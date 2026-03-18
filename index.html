@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign Extension Test</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #333; }
+    button { padding: 10px 20px; font-size: 16px; cursor: pointer; margin: 5px; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #register-btn { background: #4CAF50; color: white; border: none; border-radius: 4px; }
+    #sign-btn { background: #2196F3; color: white; border: none; border-radius: 4px; }
+    pre { background: #f5f5f5; padding: 15px; border-radius: 4px; overflow-x: auto; font-size: 13px; max-height: 400px; overflow-y: auto; }
+    .error { color: #d32f2f; }
+    .success { color: #388e3c; }
+    .status { color: #1565c0; font-style: italic; }
+    #log { white-space: pre-wrap; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <h1>Sign Extension Test</h1>
+  <p>Tests previewSign, hmacCreateSecret, PRF, credProps, and credProtect via the browser extension + native FIDO bridge.</p>
+  <p><strong>Prerequisites:</strong></p>
+  <ul>
+    <li>Sign Extension loaded in browser</li>
+    <li>Native messaging host installed (+ FIDO service on Windows)</li>
+    <li>YubiKey with previewSign support connected</li>
+  </ul>
+
+  <h2>1. Register (MakeCredential)</h2>
+  <button id="register-btn" onclick="doRegister()">Create Credential with previewSign</button>
+
+  <h2>2. Sign (GetAssertion)</h2>
+  <button id="sign-btn" onclick="doSign()" disabled>Sign with previewSign</button>
+
+  <h2>Log</h2>
+  <pre id="log"></pre>
+
+  <script>
+    const logEl = document.getElementById('log');
+    let regResult = null;
+
+    function log(msg, cls) {
+      const span = document.createElement('span');
+      if (cls) span.className = cls;
+      span.textContent = msg + '\n';
+      logEl.appendChild(span);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function hex(buf) {
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function b64url(buffer) {
+      return btoa(String.fromCharCode(...new Uint8Array(buffer)))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    function b64urlDecode(str) {
+      str = str.replace(/-/g, '+').replace(/_/g, '/');
+      while (str.length % 4) str += '=';
+      return Uint8Array.from(atob(str), c => c.charCodeAt(0));
+    }
+
+    // =========================================================================
+    // Minimal CBOR decoder/encoder
+    // =========================================================================
+
+    function decodeCBOR(data) {
+      const view = new DataView(data.buffer || data, data.byteOffset || 0, data.byteLength || data.length);
+      let offset = 0;
+
+      function readU8() { return view.getUint8(offset++); }
+      function readU16() { const v = view.getUint16(offset); offset += 2; return v; }
+      function readU32() { const v = view.getUint32(offset); offset += 4; return v; }
+
+      function readInitial() {
+        const b = readU8();
+        const major = b >> 5;
+        const info = b & 0x1f;
+        let val;
+        if (info < 24) val = info;
+        else if (info === 24) val = readU8();
+        else if (info === 25) val = readU16();
+        else if (info === 26) val = readU32();
+        else if (info === 27) {
+          const hi = readU32(), lo = readU32();
+          val = hi * 0x100000000 + lo;
+        } else throw new Error('CBOR: unsupported info ' + info);
+        return { major, val };
+      }
+
+      function decode() {
+        const { major, val } = readInitial();
+        switch (major) {
+          case 0: return val;   // unsigned int
+          case 1: return -1 - val; // negative int
+          case 2: { // byte string
+            const buf = new Uint8Array(data.buffer || data, (data.byteOffset || 0) + offset, val);
+            offset += val;
+            return new Uint8Array(buf);
+          }
+          case 3: { // text string
+            const buf = new Uint8Array(data.buffer || data, (data.byteOffset || 0) + offset, val);
+            offset += val;
+            return new TextDecoder().decode(buf);
+          }
+          case 4: { // array
+            const arr = [];
+            for (let i = 0; i < val; i++) arr.push(decode());
+            return arr;
+          }
+          case 5: { // map
+            const map = new Map();
+            for (let i = 0; i < val; i++) {
+              const k = decode();
+              const v = decode();
+              map.set(k, v);
+            }
+            return map;
+          }
+          case 7: { // simple/float
+            if (val === 20) return false;
+            if (val === 21) return true;
+            if (val === 22) return null;
+            throw new Error('CBOR: unsupported simple ' + val);
+          }
+          default: throw new Error('CBOR: unsupported major ' + major);
+        }
+      }
+
+      return decode();
+    }
+
+    function encodeCBOR(value) {
+      const parts = [];
+
+      function writeInitial(major, val) {
+        if (val < 24) { parts.push(new Uint8Array([(major << 5) | val])); }
+        else if (val < 256) { parts.push(new Uint8Array([(major << 5) | 24, val])); }
+        else if (val < 65536) {
+          const b = new Uint8Array(3);
+          b[0] = (major << 5) | 25;
+          new DataView(b.buffer).setUint16(1, val);
+          parts.push(b);
+        } else if (val < 0x100000000) {
+          const b = new Uint8Array(5);
+          b[0] = (major << 5) | 26;
+          new DataView(b.buffer).setUint32(1, val);
+          parts.push(b);
+        } else {
+          const b = new Uint8Array(9);
+          b[0] = (major << 5) | 27;
+          const dv = new DataView(b.buffer);
+          dv.setUint32(1, Math.floor(val / 0x100000000));
+          dv.setUint32(5, val >>> 0);
+          parts.push(b);
+        }
+      }
+
+      function encode(val) {
+        if (typeof val === 'number' && Number.isInteger(val)) {
+          if (val >= 0) { writeInitial(0, val); }
+          else { writeInitial(1, -1 - val); }
+        } else if (val instanceof Uint8Array) {
+          writeInitial(2, val.length);
+          parts.push(val);
+        } else if (typeof val === 'string') {
+          const encoded = new TextEncoder().encode(val);
+          writeInitial(3, encoded.length);
+          parts.push(encoded);
+        } else if (Array.isArray(val)) {
+          writeInitial(4, val.length);
+          for (const item of val) encode(item);
+        } else if (val instanceof Map) {
+          // Sort keys: negative ints first (ascending by absolute), then positive (ascending)
+          const entries = [...val.entries()];
+          entries.sort((a, b) => {
+            // CBOR canonical: sort by major type first, then by value
+            const aMajor = a[0] >= 0 ? 0 : 1;
+            const bMajor = b[0] >= 0 ? 0 : 1;
+            if (aMajor !== bMajor) return aMajor - bMajor;
+            if (aMajor === 0) return a[0] - b[0];
+            return b[0] - a[0]; // negative: -1 before -2
+          });
+          writeInitial(5, entries.length);
+          for (const [k, v] of entries) { encode(k); encode(v); }
+        } else if (typeof val === 'boolean') {
+          parts.push(new Uint8Array([val ? 0xf5 : 0xf4]));
+        } else if (val === null) {
+          parts.push(new Uint8Array([0xf6]));
+        } else {
+          throw new Error('CBOR encode: unsupported type ' + typeof val);
+        }
+      }
+
+      encode(value);
+      const totalLen = parts.reduce((s, p) => s + p.length, 0);
+      const result = new Uint8Array(totalLen);
+      let off = 0;
+      for (const p of parts) { result.set(p, off); off += p.length; }
+      return result;
+    }
+
+    // =========================================================================
+    // P-256 BigInt elliptic curve arithmetic
+    // Adapted from wallet-common/src/arkg/ec.ts
+    // =========================================================================
+
+    const P256 = {
+      p: BigInt('0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff'),
+      n: BigInt('0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551'),
+      a: BigInt('0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFC'),
+      b: BigInt('0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B'),
+      Gx: BigInt('0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296'),
+      Gy: BigInt('0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5'),
+    };
+
+    function modpos(a, m) { return ((a % m) + m) % m; }
+
+    function modpow(base, exp, mod) {
+      let result = 1n;
+      base = modpos(base, mod);
+      while (exp > 0n) {
+        if ((exp & 1n) === 1n) result = result * base % mod;
+        exp >>= 1n;
+        base = base * base % mod;
+      }
+      return result;
+    }
+
+    function modinv(n, p) { return modpow(n, p - 2n, p); }
+
+    // Point = null (identity) or {x: bigint, y: bigint}
+    function ecAdd(p1, p2) {
+      if (!p1) return p2;
+      if (!p2) return p1;
+      const { p } = P256;
+      let k;
+      if (p1.x === p2.x) {
+        if (p1.y === modpos(-p2.y, p)) return null;
+        k = (3n * p1.x * p1.x + P256.a) * modinv(2n * p1.y, p) % p;
+      } else {
+        k = (p2.y - p1.y) * modinv(p2.x - p1.x, p) % p;
+      }
+      const xr = modpos(k * k - p1.x - p2.x, p);
+      const yr = modpos(k * (p1.x - xr) - p1.y, p);
+      return { x: xr, y: yr };
+    }
+
+    function ecMul(pt, scalar) {
+      let result = null;
+      let base = pt;
+      scalar = modpos(scalar, P256.n);
+      while (scalar > 0n) {
+        if (scalar & 1n) result = ecAdd(result, base);
+        base = ecAdd(base, base);
+        scalar >>= 1n;
+      }
+      return result;
+    }
+
+    const G = { x: P256.Gx, y: P256.Gy };
+
+    function pointToUncompressed(pt) {
+      const buf = new Uint8Array(65);
+      buf[0] = 0x04;
+      const xBytes = bigintToBytes(pt.x, 32);
+      const yBytes = bigintToBytes(pt.y, 32);
+      buf.set(xBytes, 1);
+      buf.set(yBytes, 33);
+      return buf;
+    }
+
+    function bytesToBigint(bytes) {
+      let result = 0n;
+      for (const b of bytes) result = (result << 8n) | BigInt(b);
+      return result;
+    }
+
+    function bigintToBytes(val, len) {
+      const bytes = new Uint8Array(len);
+      for (let i = len - 1; i >= 0; i--) {
+        bytes[i] = Number(val & 0xffn);
+        val >>= 8n;
+      }
+      return bytes;
+    }
+
+    // =========================================================================
+    // expand_message_xmd (RFC 9380) with SHA-256
+    // Adapted from wallet-common/src/arkg/hash_to_curve.ts
+    // =========================================================================
+
+    async function sha256(data) {
+      return new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+    }
+
+    function concatBytes(...arrays) {
+      const total = arrays.reduce((s, a) => s + a.length, 0);
+      const result = new Uint8Array(total);
+      let off = 0;
+      for (const a of arrays) { result.set(a, off); off += a.length; }
+      return result;
+    }
+
+    function xorBytes(a, b) {
+      const r = new Uint8Array(a.length);
+      for (let i = 0; i < a.length; i++) r[i] = a[i] ^ b[i];
+      return r;
+    }
+
+    async function expandMessageXMD(msg, DST, lenInBytes) {
+      const bInBytes = 32; // SHA-256 output
+      const sInBytes = 64; // SHA-256 block size
+      const ell = Math.ceil(lenInBytes / bInBytes);
+
+      const DST_prime = concatBytes(DST, new Uint8Array([DST.length]));
+      const Z_pad = new Uint8Array(sInBytes);
+      const l_i_b_str = new Uint8Array([(lenInBytes >> 8) & 0xff, lenInBytes & 0xff]);
+
+      const msgPrime = concatBytes(Z_pad, msg, l_i_b_str, new Uint8Array([0x00]), DST_prime);
+      const b0 = await sha256(msgPrime);
+
+      const b = [b0];
+      b.push(await sha256(concatBytes(b0, new Uint8Array([0x01]), DST_prime)));
+
+      for (let i = 2; i <= ell; i++) {
+        const xored = xorBytes(b[0], b[i - 1]);
+        b.push(await sha256(concatBytes(xored, new Uint8Array([i]), DST_prime)));
+      }
+
+      const result = concatBytes(...b.slice(1));
+      return result.slice(0, lenInBytes);
+    }
+
+    // =========================================================================
+    // hash_to_scalar: hash to P-256 scalar field
+    // =========================================================================
+
+    async function hashToScalar(msg, DST) {
+      const L = 48; // ceil((ceil(log2(n)) + 128) / 8) for P-256
+      const uniformBytes = await expandMessageXMD(msg, DST, L);
+      // Interpret as big-endian integer, reduce mod N
+      const val = bytesToBigint(uniformBytes);
+      return modpos(val, P256.n);
+    }
+
+    // =========================================================================
+    // ARKG-P256 key derivation
+    // Adapted from wallet-common/src/arkg/index.ts
+    // =========================================================================
+
+    const DST_EXT = new TextEncoder().encode('ARKG-P256');
+
+    function I2OSP(val, len) {
+      const buf = new Uint8Array(len);
+      for (let i = len - 1; i >= 0; i--) {
+        buf[i] = val & 0xff;
+        val >>= 8;
+      }
+      return buf;
+    }
+
+    // Parse ARKG public seed from COSE key (Map with integer keys)
+    function parseArkgSeed(coseKey) {
+      // coseKey is a Map: {1: kty, 3: alg, -1: pkBl, -2: pkKem}
+      const pkBlCose = coseKey.get(-1); // pkBl is an EC2 COSE key
+      const pkKemCose = coseKey.get(-2); // pkKem is an EC2 COSE key
+      if (!pkBlCose || !pkKemCose) throw new Error('Missing pkBl or pkKem in COSE key');
+
+      return {
+        pkBl: coseEc2ToPoint(pkBlCose),
+        pkKem: coseEc2ToPoint(pkKemCose),
+      };
+    }
+
+    function coseEc2ToPoint(coseKey) {
+      // coseKey is a Map: {1: 2 (kty=EC2), -1: 1 (crv=P-256), -2: x, -3: y}
+      const x = coseKey.get(-2); // Uint8Array
+      const y = coseKey.get(-3); // Uint8Array
+      if (!x || !y || x.length !== 32 || y.length !== 32) {
+        throw new Error('Invalid EC2 COSE key coordinates');
+      }
+      return { x: bytesToBigint(x), y: bytesToBigint(y) };
+    }
+
+    async function arkgDerivePublicKey(seed, ikm, ctx) {
+      if (ctx.length > 64) throw new Error('ctx too long (max 64 bytes)');
+
+      const ctxPrime = concatBytes(new Uint8Array([ctx.length]), ctx);
+      const ctxKem = concatBytes(new TextEncoder().encode('ARKG-Derive-Key-KEM.'), ctxPrime);
+      const ctxBl = concatBytes(new TextEncoder().encode('ARKG-Derive-Key-BL.'), ctxPrime);
+
+      // KEM encapsulate
+      const [ikmTau, c] = await hmacKemEncaps(seed.pkKem, ikm, ctxKem);
+
+      // BL PRF: hash to scalar with domain separation
+      const dstTau = concatBytes(
+        new TextEncoder().encode('ARKG-BL-EC.'), DST_EXT, ctxBl
+      );
+      const tau = await hashToScalar(new Uint8Array(ikmTau), dstTau);
+
+      // BL blind public key: pk + tau*G
+      const tauG = ecMul(G, tau);
+      const pkPrime = ecAdd(seed.pkBl, tauG);
+
+      return { publicKey: pkPrime, keyHandle: new Uint8Array(c) };
+    }
+
+    // ECDH-KEM with HMAC wrapper
+    async function hmacKemEncaps(pkKem, ikm, ctx) {
+      const DST_aug = new TextEncoder().encode('ARKG-ECDH.ARKG-P256');
+
+      // Generate ephemeral keypair from IKM via hash_to_scalar
+      const dstKemSk = concatBytes(
+        new TextEncoder().encode('ARKG-KEM-ECDH-KG.'), DST_aug
+      );
+      const ephSk = await hashToScalar(ikm, dstKemSk);
+      const ephPk = ecMul(G, ephSk);
+
+      // Import pkKem as WebCrypto ECDH key
+      const pkKemRaw = pointToUncompressed(pkKem);
+      const pkKemCryptoKey = await crypto.subtle.importKey(
+        'raw', pkKemRaw, { name: 'ECDH', namedCurve: 'P-256' }, false, []
+      );
+
+      // Import ephemeral private key as WebCrypto ECDH key
+      const ephPkPoint = ecMul(G, ephSk);
+      const ephSkCryptoKey = await crypto.subtle.importKey('jwk', {
+        kty: 'EC', crv: 'P-256',
+        x: arrayToBase64url(bigintToBytes(ephPkPoint.x, 32)),
+        y: arrayToBase64url(bigintToBytes(ephPkPoint.y, 32)),
+        d: arrayToBase64url(bigintToBytes(ephSk, 32)),
+      }, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
+
+      // ECDH: shared secret = x-coordinate of pkKem * ephSk
+      const sharedBits = await crypto.subtle.deriveBits(
+        { name: 'ECDH', public: pkKemCryptoKey }, ephSkCryptoKey, 256
+      );
+      const kPrime = new Uint8Array(sharedBits);
+
+      // Ephemeral public key as uncompressed point
+      const cPrime = pointToUncompressed(ephPk);
+
+      // HMAC-KEM wrapper (matches Rust hmac_kem_encaps and TS arkgHmacKem)
+      // Note: the TS code wraps SubKem with ctx_sub = "ARKG-KEM-HMAC." || DST_ext || ctx
+      // But the Rust code uses DST_aug = "ARKG-ECDH.ARKG-P256" directly in the HMAC-KEM.
+      // The HMAC-KEM ctx parameter is already ctx_kem from above.
+      // The TS passes ctx_sub = "ARKG-KEM-HMAC." || DST_aug || ctx to the inner KEM,
+      // but the inner KEM ignores ctx (see encaps: _ctx is unused).
+      // The HMAC-KEM mac info = "ARKG-KEM-HMAC-mac." || DST_aug || ctx
+      // and shared info = "ARKG-KEM-HMAC-shared." || DST_aug || ctx
+
+      const macInfo = concatBytes(
+        new TextEncoder().encode('ARKG-KEM-HMAC-mac.'), DST_aug, ctx
+      );
+      const sharedInfo = concatBytes(
+        new TextEncoder().encode('ARKG-KEM-HMAC-shared.'), DST_aug, ctx
+      );
+
+      // HKDF-SHA256 for MAC key
+      const hkdfKey = await crypto.subtle.importKey(
+        'raw', kPrime, { name: 'HKDF' }, false, ['deriveBits', 'deriveKey']
+      );
+
+      const mk = await crypto.subtle.deriveKey(
+        { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array([]), info: macInfo },
+        hkdfKey,
+        { name: 'HMAC', hash: 'SHA-256', length: 256 },
+        false, ['sign']
+      );
+
+      const macFull = new Uint8Array(await crypto.subtle.sign('HMAC', mk, cPrime));
+      const t = macFull.slice(0, 16);
+
+      // HKDF-SHA256 for shared secret
+      const k = new Uint8Array(await crypto.subtle.deriveBits(
+        { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array([]), info: sharedInfo },
+        hkdfKey,
+        kPrime.length * 8
+      ));
+
+      // Ciphertext = MAC tag || ephemeral public key
+      const c = concatBytes(t, cPrime);
+
+      return [k, c];
+    }
+
+    function arrayToBase64url(arr) {
+      return btoa(String.fromCharCode(...arr))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    // Encode COSE_Sign_Args: {3: alg, -1: arkg_kh, -2: ctx}
+    function encodeCoseSignArgs(alg, arkgKh, ctx) {
+      const map = new Map();
+      map.set(3, alg);
+      map.set(-1, arkgKh);
+      map.set(-2, ctx);
+      return encodeCBOR(map);
+    }
+
+    // =========================================================================
+    // WebAuthn test functions
+    // =========================================================================
+
+    async function doRegister() {
+      log('--- MakeCredential with previewSign ---', 'status');
+      const registerBtn = document.getElementById('register-btn');
+      registerBtn.disabled = true;
+
+      try {
+        const challenge = crypto.getRandomValues(new Uint8Array(32));
+        const userId = crypto.getRandomValues(new Uint8Array(16));
+        const prfCreateSalt1 = crypto.getRandomValues(new Uint8Array(32));
+        const prfCreateSalt2 = crypto.getRandomValues(new Uint8Array(32));
+
+        const options = {
+          publicKey: {
+            rp: { id: location.hostname, name: 'previewSign Test' },
+            user: {
+              id: userId,
+              name: 'testuser@example.com',
+              displayName: 'Test User'
+            },
+            challenge: challenge,
+            pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+            authenticatorSelection: {
+              residentKey: 'required',
+              userVerification: 'required'
+            },
+            timeout: 120000,
+            extensions: {
+              previewSign: {
+                generateKey: {
+                  algorithms: [-65539]  // ESP256-ARKG
+                }
+              },
+              hmacCreateSecret: true,
+              credProps: true,
+              credentialProtectionPolicy: 'userVerificationRequired',
+              prf: {
+                eval: {
+                  first: prfCreateSalt1.buffer,
+                  second: prfCreateSalt2.buffer,
+                }
+              },
+            }
+          }
+        };
+
+        log('Options: ' + JSON.stringify({
+          rp: options.publicKey.rp,
+          extensions: {
+            ...options.publicKey.extensions,
+            prf: {
+              eval: {
+                first: hex(prfCreateSalt1),
+                second: hex(prfCreateSalt2),
+              }
+            }
+          }
+        }, null, 2));
+
+        log('Touch your YubiKey...', 'status');
+        const credential = await navigator.credentials.create(options);
+        log('Registration succeeded!', 'success');
+
+        log('\nCredential ID: ' + b64url(credential.rawId));
+        log('Type: ' + credential.type);
+
+        if (credential.response) {
+          log('clientDataJSON: ' + b64url(credential.response.clientDataJSON));
+          log('attestationObject: ' + b64url(credential.response.attestationObject) + ' (' + credential.response.attestationObject.byteLength + ' bytes)');
+        }
+
+        // Check extension results
+        const extResults = credential.getClientExtensionResults
+          ? credential.getClientExtensionResults()
+          : (credential.clientExtensionResults || {});
+
+        log('\nClient extension results: ' + JSON.stringify(extResults, null, 2));
+
+        if (extResults.previewSign) {
+          log('previewSign output present!', 'success');
+          const ps = extResults.previewSign;
+          if (ps.generatedKey) {
+            const khDisplay = (ps.generatedKey.keyHandle instanceof ArrayBuffer ||
+              ps.generatedKey.keyHandle instanceof Uint8Array)
+              ? b64url(ps.generatedKey.keyHandle)
+              : ps.generatedKey.keyHandle;
+            const pkDisplay = (ps.generatedKey.publicKey instanceof ArrayBuffer ||
+              ps.generatedKey.publicKey instanceof Uint8Array)
+              ? b64url(ps.generatedKey.publicKey)
+              : ps.generatedKey.publicKey;
+            log('  keyHandle: ' + khDisplay + ' (' +
+              (ps.generatedKey.keyHandle.byteLength || ps.generatedKey.keyHandle.length) + ' bytes)');
+            log('  publicKey: ' + pkDisplay + ' (' +
+              (ps.generatedKey.publicKey.byteLength || ps.generatedKey.publicKey.length) + ' bytes)');
+            log('  algorithm: ' + ps.generatedKey.algorithm);
+
+            // Parse and display ARKG public seed
+            try {
+              const pkBytes = ps.generatedKey.publicKey instanceof ArrayBuffer
+                ? new Uint8Array(ps.generatedKey.publicKey)
+                : (ps.generatedKey.publicKey instanceof Uint8Array
+                  ? ps.generatedKey.publicKey
+                  : b64urlDecode(ps.generatedKey.publicKey));
+              const coseKey = decodeCBOR(pkBytes);
+              const seed = parseArkgSeed(coseKey);
+              log('  ARKG pkBl.x:  ' + seed.pkBl.x.toString(16));
+              log('  ARKG pkKem.x: ' + seed.pkKem.x.toString(16));
+              log('  ARKG seed parsed successfully', 'success');
+            } catch (e) {
+              log('  Warning: could not parse ARKG seed: ' + e.message, 'error');
+            }
+          }
+        } else {
+          log('No previewSign in extension results', 'error');
+        }
+
+        // hmacCreateSecret result
+        if (extResults.hmacCreateSecret !== undefined) {
+          log('hmacCreateSecret: ' + extResults.hmacCreateSecret, extResults.hmacCreateSecret ? 'success' : 'error');
+        } else {
+          log('hmacCreateSecret: not in results (authenticator may not support it)');
+        }
+
+        // credProps result
+        if (extResults.credProps) {
+          log('credProps.rk: ' + extResults.credProps.rk, 'success');
+        } else {
+          log('credProps: not in results');
+        }
+
+        // prf result (MakeCredential returns { enabled: true/false, results?: ... })
+        if (extResults.prf) {
+          log('prf.enabled: ' + extResults.prf.enabled, extResults.prf.enabled ? 'success' : 'error');
+          if (extResults.prf.results) {
+            const first = extResults.prf.results.first;
+            const firstBytes = new Uint8Array(first instanceof ArrayBuffer ? first : first.buffer || first);
+            log('  prf.results.first:  ' + hex(firstBytes) + ' (' + firstBytes.length + ' bytes)', 'success');
+            if (extResults.prf.results.second) {
+              const second = extResults.prf.results.second;
+              const secondBytes = new Uint8Array(second instanceof ArrayBuffer ? second : second.buffer || second);
+              log('  prf.results.second: ' + hex(secondBytes) + ' (' + secondBytes.length + ' bytes)', 'success');
+            }
+          }
+        } else {
+          log('prf: not in results');
+        }
+
+        // Store for signing
+        regResult = {
+          credentialId: new Uint8Array(credential.rawId),
+          extResults: extResults
+        };
+        document.getElementById('sign-btn').disabled = false;
+
+      } catch (e) {
+        log('Error: ' + e.message, 'error');
+        log(e.stack || '', 'error');
+      } finally {
+        registerBtn.disabled = false;
+      }
+    }
+
+    async function doSign() {
+      if (!regResult) {
+        log('Register first!', 'error');
+        return;
+      }
+
+      log('\n--- GetAssertion with previewSign + ARKG ---', 'status');
+      const signBtn = document.getElementById('sign-btn');
+      signBtn.disabled = true;
+
+      try {
+        const challenge = crypto.getRandomValues(new Uint8Array(32));
+        const tbsRaw = new TextEncoder().encode('Hello, previewSign v4!');
+        const tbsHash = new Uint8Array(await crypto.subtle.digest('SHA-256', tbsRaw));
+        log('TBS: "Hello, previewSign v4!"');
+        log('TBS hash: ' + hex(tbsHash));
+
+        const credIdB64 = b64url(regResult.credentialId);
+        const signByCredential = {};
+
+        const ps = regResult.extResults.previewSign;
+        if (ps && ps.generatedKey) {
+          // Get the original key handle from MakeCredential
+          const origKh = (ps.generatedKey.keyHandle instanceof ArrayBuffer ||
+            ps.generatedKey.keyHandle instanceof Uint8Array)
+            ? new Uint8Array(ps.generatedKey.keyHandle)
+            : b64urlDecode(ps.generatedKey.keyHandle);
+
+          // Parse ARKG public seed from the COSE key
+          const pkBytes = (ps.generatedKey.publicKey instanceof ArrayBuffer ||
+            ps.generatedKey.publicKey instanceof Uint8Array)
+            ? new Uint8Array(ps.generatedKey.publicKey)
+            : b64urlDecode(ps.generatedKey.publicKey);
+          const coseKey = decodeCBOR(pkBytes);
+          const seed = parseArkgSeed(coseKey);
+          log('Parsed ARKG seed from MakeCredential publicKey', 'success');
+
+          // ARKG key derivation
+          const arkgIkm = crypto.getRandomValues(new Uint8Array(32));
+          const arkgCtx = new TextEncoder().encode('previewSign-test');
+          log('ARKG IKM: ' + hex(arkgIkm));
+          log('ARKG ctx: "previewSign-test"');
+
+          log('Deriving ARKG public key...', 'status');
+          const derived = await arkgDerivePublicKey(seed, arkgIkm, arkgCtx);
+          log('ARKG derived pk: ' + hex(pointToUncompressed(derived.publicKey)));
+          log('ARKG key handle: ' + hex(derived.keyHandle) + ' (' + derived.keyHandle.length + ' bytes)');
+
+          // Encode COSE_Sign_Args: {3: alg, -1: arkg_kh, -2: ctx}
+          const additionalArgs = encodeCoseSignArgs(-65539, derived.keyHandle, arkgCtx);
+          log('COSE_Sign_Args: ' + hex(additionalArgs) + ' (' + additionalArgs.length + ' bytes)');
+
+          signByCredential[credIdB64] = {
+            keyHandle: origKh,
+            tbs: tbsHash,
+            additionalArgs: additionalArgs
+          };
+          log('signByCredential entry built with additionalArgs', 'success');
+        }
+
+        // PRF eval salts (32 bytes each)
+        const prfSalt1 = crypto.getRandomValues(new Uint8Array(32));
+        const prfSalt2 = crypto.getRandomValues(new Uint8Array(32));
+        log('PRF salt1: ' + hex(prfSalt1));
+        log('PRF salt2: ' + hex(prfSalt2));
+
+        const options = {
+          publicKey: {
+            rpId: location.hostname,
+            challenge: challenge,
+            allowCredentials: [{
+              type: 'public-key',
+              id: regResult.credentialId
+            }],
+            userVerification: 'preferred',
+            timeout: 120000,
+            extensions: {
+              previewSign: {
+                signByCredential: signByCredential
+              },
+              prf: {
+                eval: {
+                  first: prfSalt1.buffer,
+                  second: prfSalt2.buffer,
+                }
+              },
+            }
+          }
+        };
+
+        log('Sending GetAssertion...', 'status');
+        log('Touch your YubiKey...', 'status');
+        const assertion = await navigator.credentials.get(options);
+        log('Authentication succeeded!', 'success');
+
+        log('\nCredential ID: ' + b64url(assertion.rawId));
+
+        if (assertion.response) {
+          log('authenticatorData: ' + b64url(assertion.response.authenticatorData) + ' (' + assertion.response.authenticatorData.byteLength + ' bytes)');
+          log('signature: ' + b64url(assertion.response.signature) + ' (' + assertion.response.signature.byteLength + ' bytes)');
+        }
+
+        const extResults = assertion.getClientExtensionResults
+          ? assertion.getClientExtensionResults()
+          : (assertion.clientExtensionResults || {});
+
+        log('\nClient extension results: ' + JSON.stringify(extResults, null, 2));
+
+        if (extResults.previewSign && extResults.previewSign.signature) {
+          log('previewSign signature present!', 'success');
+          const sig = extResults.previewSign.signature;
+          const sigBytes = (sig instanceof ArrayBuffer || sig instanceof Uint8Array)
+            ? new Uint8Array(sig) : b64urlDecode(sig);
+          log('  signature: ' + hex(sigBytes) + ' (' + sigBytes.length + ' bytes)');
+        }
+
+        // PRF results (GetAssertion returns { results: { first, second? } })
+        if (extResults.prf) {
+          if (extResults.prf.results) {
+            log('prf results present!', 'success');
+            const first = extResults.prf.results.first;
+            const firstBytes = (first instanceof ArrayBuffer) ? new Uint8Array(first)
+              : (first instanceof Uint8Array) ? first : b64urlDecode(first);
+            log('  prf.results.first:  ' + hex(firstBytes) + ' (' + firstBytes.length + ' bytes)');
+            if (extResults.prf.results.second) {
+              const second = extResults.prf.results.second;
+              const secondBytes = (second instanceof ArrayBuffer) ? new Uint8Array(second)
+                : (second instanceof Uint8Array) ? second : b64urlDecode(second);
+              log('  prf.results.second: ' + hex(secondBytes) + ' (' + secondBytes.length + ' bytes)');
+            }
+          } else {
+            log('prf: no results (enabled=' + extResults.prf.enabled + ')');
+          }
+        } else {
+          log('prf: not in results');
+        }
+
+      } catch (e) {
+        log('Error: ' + e.message, 'error');
+        log(e.stack || '', 'error');
+      } finally {
+        signBtn.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>
