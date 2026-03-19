@@ -1,0 +1,11 @@
+{
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appID": "LQA3CS5MM7.com.yubico.Sign-Extension-iOS",
+        "paths": ["/fido/*", "/fido"]
+      }
+    ]
+  }
+}
