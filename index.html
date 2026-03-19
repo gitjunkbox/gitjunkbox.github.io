@@ -3,815 +3,647 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sign Extension Test</title>
+  <title>Sign Extension Test Suite</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }
-    h1 { color: #333; }
-    button { padding: 10px 20px; font-size: 16px; cursor: pointer; margin: 5px; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #333; }
+    h1 { margin-bottom: 4px; }
+    h1 + p { color: #666; margin-top: 0; }
+    h3 { margin: 18px 0 8px; color: #555; border-bottom: 1px solid #e0e0e0; padding-bottom: 4px; }
+
+    /* Controls */
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; margin: 16px 0; }
+    .controls label { font-size: 13px; color: #555; }
+    .controls input[type="text"] { padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+    button { padding: 8px 18px; font-size: 14px; cursor: pointer; border: none; border-radius: 4px; color: white; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
-    #register-btn { background: #4CAF50; color: white; border: none; border-radius: 4px; }
-    #sign-btn { background: #2196F3; color: white; border: none; border-radius: 4px; }
-    pre { background: #f5f5f5; padding: 15px; border-radius: 4px; overflow-x: auto; font-size: 13px; max-height: 400px; overflow-y: auto; }
-    .error { color: #d32f2f; }
-    .success { color: #388e3c; }
-    .status { color: #1565c0; font-style: italic; }
-    #log { white-space: pre-wrap; word-break: break-all; }
+    #btn-register { background: #4CAF50; }
+    #btn-auth { background: #2196F3; }
+    #btn-copy { background: #757575; font-size: 12px; padding: 6px 12px; }
+
+    /* Summary checklist */
+    #summary { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 6px; padding: 16px; margin: 16px 0; font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; font-size: 13px; line-height: 1.7; white-space: pre-wrap; }
+    .test-row { display: flex; gap: 8px; }
+    .test-icon { width: 18px; text-align: center; flex-shrink: 0; }
+    .test-label { flex: 1; }
+    .test-detail { color: #888; }
+    .pass .test-icon { color: #2e7d32; }
+    .pass .test-label { color: #2e7d32; }
+    .fail .test-icon { color: #c62828; }
+    .fail .test-label { color: #c62828; }
+    .skip .test-icon { color: #9e9e9e; }
+    .skip .test-label { color: #9e9e9e; }
+    .pending .test-icon { color: #bdbdbd; }
+    .pending .test-label { color: #bdbdbd; }
+    .section-header { font-weight: 600; color: #333; margin-top: 6px; }
+
+    /* Detail log */
+    #log-section summary { cursor: pointer; font-weight: 600; color: #555; margin: 12px 0; }
+    #log { background: #f5f5f5; padding: 12px; border-radius: 4px; overflow-x: auto; font-size: 12px; max-height: 500px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; }
+    #log .error { color: #c62828; }
+    #log .success { color: #2e7d32; }
+    #log .status { color: #1565c0; font-style: italic; }
   </style>
 </head>
 <body>
-  <h1>Sign Extension Test</h1>
-  <p>Tests previewSign, hmacCreateSecret, PRF, credProps, and credProtect via the browser extension + native FIDO bridge.</p>
-  <p><strong>Prerequisites:</strong></p>
-  <ul>
-    <li>Sign Extension loaded in browser</li>
-    <li>Native messaging host installed (+ FIDO service on Windows)</li>
-    <li>YubiKey with previewSign support connected</li>
-  </ul>
+  <h1>Sign Extension Test Suite</h1>
+  <p>Tests previewSign, PRF, credProps, credProtect, credBlob, largeBlob, and ARKG signing.</p>
 
-  <h2>1. Register (MakeCredential)</h2>
-  <button id="register-btn" onclick="doRegister()">Create Credential with previewSign</button>
+  <div class="controls">
+    <div>
+      <label for="cred-blob-input">credBlob</label><br>
+      <input id="cred-blob-input" type="text" value="hello credBlob!" maxlength="32" size="20">
+    </div>
+    <div>
+      <label for="large-blob-input">largeBlob data</label><br>
+      <input id="large-blob-input" type="text" value="Test largeBlob data" size="24">
+    </div>
+    <div style="display:flex; gap:6px; align-self:end;">
+      <button id="btn-register" onclick="runAll()">Register + Authenticate</button>
+      <button id="btn-copy" onclick="copySummary()">Copy Summary</button>
+    </div>
+  </div>
 
-  <h2>2. Sign (GetAssertion)</h2>
-  <button id="sign-btn" onclick="doSign()" disabled>Sign with previewSign</button>
+  <div id="summary"></div>
 
-  <h2>Log</h2>
-  <pre id="log"></pre>
+  <details id="log-section">
+    <summary>Detailed Log</summary>
+    <pre id="log"></pre>
+  </details>
 
   <script>
-    const logEl = document.getElementById('log');
-    let regResult = null;
+    "use strict";
 
+    // =========================================================================
+    // Test framework
+    // =========================================================================
+
+    const TESTS = {
+      create: [
+        { id: "create-ok", label: "MakeCredential succeeded" },
+        { id: "previewsign-key", label: "previewSign.generatedKey" },
+        { id: "previewsign-alg", label: "previewSign algorithm" },
+        { id: "prf-enabled", label: "prf.enabled" },
+        { id: "prf-mc-results", label: "prf.results (hmac-secret-mc)" },
+        { id: "credprops-rk", label: "credProps.rk" },
+        { id: "credprotect", label: "credProtect" },
+        { id: "credblob-set", label: "credBlob stored" },
+        { id: "largeblob-supported", label: "largeBlob.supported" },
+      ],
+      get: [
+        { id: "get-ok", label: "GetAssertion succeeded" },
+        { id: "previewsign-sig", label: "previewSign.signature" },
+        { id: "prf-first", label: "prf.results.first" },
+        { id: "prf-second", label: "prf.results.second" },
+        { id: "credblob-get", label: "credBlob retrieved" },
+        { id: "arkg-verify", label: "ARKG signature verified" },
+      ],
+      largeBlob: [
+        { id: "lb-read-empty", label: "largeBlob initial read" },
+        { id: "lb-write", label: "largeBlob write" },
+        { id: "lb-readback", label: "largeBlob read back" },
+      ],
+    };
+
+    const results = {}; // id -> { status: "pass"|"fail"|"skip"|"pending", detail?: string }
+
+    function initSummary() {
+      for (const group of Object.values(TESTS)) {
+        for (const t of group) {
+          results[t.id] = { status: "pending", detail: "" };
+        }
+      }
+      renderSummary();
+    }
+
+    function pass(id, detail) { results[id] = { status: "pass", detail: detail || "" }; renderSummary(); }
+    function fail(id, detail) { results[id] = { status: "fail", detail: detail || "" }; renderSummary(); }
+    function skip(id, detail) { results[id] = { status: "skip", detail: detail || "" }; renderSummary(); }
+
+    const ICONS = { pass: "\u2713", fail: "\u2717", skip: "\u2013", pending: "\u00B7" };
+    const SECTION_LABELS = { create: "MakeCredential", get: "GetAssertion", largeBlob: "LargeBlob Lifecycle" };
+
+    function renderSummary() {
+      const el = document.getElementById("summary");
+      let html = "";
+      for (const [section, tests] of Object.entries(TESTS)) {
+        html += `<div class="section-header">${SECTION_LABELS[section]}</div>`;
+        for (const t of tests) {
+          const r = results[t.id] || { status: "pending", detail: "" };
+          const detail = r.detail ? ` <span class="test-detail">${esc(r.detail)}</span>` : "";
+          html += `<div class="test-row ${r.status}"><span class="test-icon">${ICONS[r.status]}</span><span class="test-label">${esc(t.label)}${detail}</span></div>`;
+        }
+      }
+      el.innerHTML = html;
+    }
+
+    function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+
+    function copySummary() {
+      const lines = [`Sign Extension Test Results — ${new Date().toISOString().slice(0,10)}\n`];
+      for (const [section, tests] of Object.entries(TESTS)) {
+        lines.push(`${SECTION_LABELS[section]}:`);
+        for (const t of tests) {
+          const r = results[t.id] || { status: "pending", detail: "" };
+          const tag = r.status === "pass" ? "PASS" : r.status === "fail" ? "FAIL" : r.status === "skip" ? "SKIP" : "----";
+          const detail = r.detail ? ` — ${r.detail}` : "";
+          lines.push(`  ${tag}  ${t.label}${detail}`);
+        }
+        lines.push("");
+      }
+      const text = lines.join("\n");
+      navigator.clipboard.writeText(text).then(
+        () => { const b = document.getElementById("btn-copy"); b.textContent = "Copied!"; setTimeout(() => b.textContent = "Copy Summary", 1500); },
+        () => { prompt("Copy this:", text); }
+      );
+    }
+
+    // =========================================================================
+    // Logging
+    // =========================================================================
+
+    const logEl = document.getElementById("log");
     function log(msg, cls) {
-      const span = document.createElement('span');
+      const span = document.createElement("span");
       if (cls) span.className = cls;
-      span.textContent = msg + '\n';
+      span.textContent = msg + "\n";
       logEl.appendChild(span);
       logEl.scrollTop = logEl.scrollHeight;
     }
 
+    // =========================================================================
+    // Utility functions
+    // =========================================================================
+
     function hex(buf) {
-      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+      return Array.from(new Uint8Array(buf instanceof ArrayBuffer ? buf : buf.buffer || buf))
+        .map(b => b.toString(16).padStart(2, "0")).join("");
     }
 
     function b64url(buffer) {
       return btoa(String.fromCharCode(...new Uint8Array(buffer)))
-        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
     }
 
     function b64urlDecode(str) {
-      str = str.replace(/-/g, '+').replace(/_/g, '/');
-      while (str.length % 4) str += '=';
+      str = str.replace(/-/g, "+").replace(/_/g, "/");
+      while (str.length % 4) str += "=";
       return Uint8Array.from(atob(str), c => c.charCodeAt(0));
     }
 
+    function toBytes(val) {
+      if (val instanceof ArrayBuffer) return new Uint8Array(val);
+      if (val instanceof Uint8Array) return val;
+      if (typeof val === "string") return b64urlDecode(val);
+      return null;
+    }
+
+    function byteLen(val) {
+      const b = toBytes(val);
+      return b ? b.length : 0;
+    }
+
     // =========================================================================
-    // Minimal CBOR decoder/encoder
+    // CBOR encoder/decoder
     // =========================================================================
 
     function decodeCBOR(data) {
       const view = new DataView(data.buffer || data, data.byteOffset || 0, data.byteLength || data.length);
       let offset = 0;
-
       function readU8() { return view.getUint8(offset++); }
       function readU16() { const v = view.getUint16(offset); offset += 2; return v; }
       function readU32() { const v = view.getUint32(offset); offset += 4; return v; }
-
       function readInitial() {
-        const b = readU8();
-        const major = b >> 5;
-        const info = b & 0x1f;
-        let val;
+        const b = readU8(); const major = b >> 5; const info = b & 0x1f; let val;
         if (info < 24) val = info;
         else if (info === 24) val = readU8();
         else if (info === 25) val = readU16();
         else if (info === 26) val = readU32();
-        else if (info === 27) {
-          const hi = readU32(), lo = readU32();
-          val = hi * 0x100000000 + lo;
-        } else throw new Error('CBOR: unsupported info ' + info);
+        else if (info === 27) { val = readU32() * 0x100000000 + readU32(); }
+        else throw new Error("CBOR: unsupported info " + info);
         return { major, val };
       }
-
       function decode() {
         const { major, val } = readInitial();
         switch (major) {
-          case 0: return val;   // unsigned int
-          case 1: return -1 - val; // negative int
-          case 2: { // byte string
-            const buf = new Uint8Array(data.buffer || data, (data.byteOffset || 0) + offset, val);
-            offset += val;
-            return new Uint8Array(buf);
-          }
-          case 3: { // text string
-            const buf = new Uint8Array(data.buffer || data, (data.byteOffset || 0) + offset, val);
-            offset += val;
-            return new TextDecoder().decode(buf);
-          }
-          case 4: { // array
-            const arr = [];
-            for (let i = 0; i < val; i++) arr.push(decode());
-            return arr;
-          }
-          case 5: { // map
-            const map = new Map();
-            for (let i = 0; i < val; i++) {
-              const k = decode();
-              const v = decode();
-              map.set(k, v);
-            }
-            return map;
-          }
-          case 7: { // simple/float
-            if (val === 20) return false;
-            if (val === 21) return true;
-            if (val === 22) return null;
-            throw new Error('CBOR: unsupported simple ' + val);
-          }
-          default: throw new Error('CBOR: unsupported major ' + major);
+          case 0: return val;
+          case 1: return -1 - val;
+          case 2: { const buf = new Uint8Array(data.buffer || data, (data.byteOffset || 0) + offset, val); offset += val; return new Uint8Array(buf); }
+          case 3: { const buf = new Uint8Array(data.buffer || data, (data.byteOffset || 0) + offset, val); offset += val; return new TextDecoder().decode(buf); }
+          case 4: { const arr = []; for (let i = 0; i < val; i++) arr.push(decode()); return arr; }
+          case 5: { const map = new Map(); for (let i = 0; i < val; i++) { map.set(decode(), decode()); } return map; }
+          case 7: { if (val === 20) return false; if (val === 21) return true; if (val === 22) return null; throw new Error("CBOR: unsupported simple " + val); }
+          default: throw new Error("CBOR: unsupported major " + major);
         }
       }
-
       return decode();
     }
 
     function encodeCBOR(value) {
       const parts = [];
-
       function writeInitial(major, val) {
-        if (val < 24) { parts.push(new Uint8Array([(major << 5) | val])); }
-        else if (val < 256) { parts.push(new Uint8Array([(major << 5) | 24, val])); }
-        else if (val < 65536) {
-          const b = new Uint8Array(3);
-          b[0] = (major << 5) | 25;
-          new DataView(b.buffer).setUint16(1, val);
-          parts.push(b);
-        } else if (val < 0x100000000) {
-          const b = new Uint8Array(5);
-          b[0] = (major << 5) | 26;
-          new DataView(b.buffer).setUint32(1, val);
-          parts.push(b);
-        } else {
-          const b = new Uint8Array(9);
-          b[0] = (major << 5) | 27;
-          const dv = new DataView(b.buffer);
-          dv.setUint32(1, Math.floor(val / 0x100000000));
-          dv.setUint32(5, val >>> 0);
-          parts.push(b);
-        }
+        if (val < 24) parts.push(new Uint8Array([(major << 5) | val]));
+        else if (val < 256) parts.push(new Uint8Array([(major << 5) | 24, val]));
+        else if (val < 65536) { const b = new Uint8Array(3); b[0] = (major << 5) | 25; new DataView(b.buffer).setUint16(1, val); parts.push(b); }
+        else if (val < 0x100000000) { const b = new Uint8Array(5); b[0] = (major << 5) | 26; new DataView(b.buffer).setUint32(1, val); parts.push(b); }
+        else { const b = new Uint8Array(9); b[0] = (major << 5) | 27; const dv = new DataView(b.buffer); dv.setUint32(1, Math.floor(val / 0x100000000)); dv.setUint32(5, val >>> 0); parts.push(b); }
       }
-
       function encode(val) {
-        if (typeof val === 'number' && Number.isInteger(val)) {
-          if (val >= 0) { writeInitial(0, val); }
-          else { writeInitial(1, -1 - val); }
-        } else if (val instanceof Uint8Array) {
-          writeInitial(2, val.length);
-          parts.push(val);
-        } else if (typeof val === 'string') {
-          const encoded = new TextEncoder().encode(val);
-          writeInitial(3, encoded.length);
-          parts.push(encoded);
-        } else if (Array.isArray(val)) {
-          writeInitial(4, val.length);
-          for (const item of val) encode(item);
-        } else if (val instanceof Map) {
-          // Sort keys: negative ints first (ascending by absolute), then positive (ascending)
-          const entries = [...val.entries()];
-          entries.sort((a, b) => {
-            // CBOR canonical: sort by major type first, then by value
-            const aMajor = a[0] >= 0 ? 0 : 1;
-            const bMajor = b[0] >= 0 ? 0 : 1;
-            if (aMajor !== bMajor) return aMajor - bMajor;
-            if (aMajor === 0) return a[0] - b[0];
-            return b[0] - a[0]; // negative: -1 before -2
-          });
-          writeInitial(5, entries.length);
-          for (const [k, v] of entries) { encode(k); encode(v); }
-        } else if (typeof val === 'boolean') {
-          parts.push(new Uint8Array([val ? 0xf5 : 0xf4]));
-        } else if (val === null) {
-          parts.push(new Uint8Array([0xf6]));
-        } else {
-          throw new Error('CBOR encode: unsupported type ' + typeof val);
+        if (typeof val === "number" && Number.isInteger(val)) { if (val >= 0) writeInitial(0, val); else writeInitial(1, -1 - val); }
+        else if (val instanceof Uint8Array) { writeInitial(2, val.length); parts.push(val); }
+        else if (typeof val === "string") { const e = new TextEncoder().encode(val); writeInitial(3, e.length); parts.push(e); }
+        else if (Array.isArray(val)) { writeInitial(4, val.length); for (const i of val) encode(i); }
+        else if (val instanceof Map) {
+          const entries = [...val.entries()].sort((a, b) => { const am = a[0] >= 0 ? 0 : 1; const bm = b[0] >= 0 ? 0 : 1; if (am !== bm) return am - bm; return am === 0 ? a[0] - b[0] : b[0] - a[0]; });
+          writeInitial(5, entries.length); for (const [k, v] of entries) { encode(k); encode(v); }
         }
+        else if (typeof val === "boolean") parts.push(new Uint8Array([val ? 0xf5 : 0xf4]));
+        else if (val === null) parts.push(new Uint8Array([0xf6]));
+        else throw new Error("CBOR encode: unsupported type " + typeof val);
       }
-
       encode(value);
-      const totalLen = parts.reduce((s, p) => s + p.length, 0);
-      const result = new Uint8Array(totalLen);
-      let off = 0;
+      const total = parts.reduce((s, p) => s + p.length, 0);
+      const result = new Uint8Array(total); let off = 0;
       for (const p of parts) { result.set(p, off); off += p.length; }
       return result;
     }
 
     // =========================================================================
-    // P-256 BigInt elliptic curve arithmetic
-    // Adapted from wallet-common/src/arkg/ec.ts
+    // P-256 elliptic curve math (for ARKG)
     // =========================================================================
 
     const P256 = {
-      p: BigInt('0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff'),
-      n: BigInt('0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551'),
-      a: BigInt('0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFC'),
-      b: BigInt('0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B'),
-      Gx: BigInt('0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296'),
-      Gy: BigInt('0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5'),
+      p: BigInt("0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff"),
+      n: BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551"),
+      a: BigInt("0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFC"),
+      b: BigInt("0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B"),
+      Gx: BigInt("0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296"),
+      Gy: BigInt("0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5"),
     };
-
     function modpos(a, m) { return ((a % m) + m) % m; }
-
-    function modpow(base, exp, mod) {
-      let result = 1n;
-      base = modpos(base, mod);
-      while (exp > 0n) {
-        if ((exp & 1n) === 1n) result = result * base % mod;
-        exp >>= 1n;
-        base = base * base % mod;
-      }
-      return result;
-    }
-
+    function modpow(base, exp, mod) { let r = 1n; base = modpos(base, mod); while (exp > 0n) { if ((exp & 1n) === 1n) r = r * base % mod; exp >>= 1n; base = base * base % mod; } return r; }
     function modinv(n, p) { return modpow(n, p - 2n, p); }
-
-    // Point = null (identity) or {x: bigint, y: bigint}
-    function ecAdd(p1, p2) {
-      if (!p1) return p2;
-      if (!p2) return p1;
-      const { p } = P256;
-      let k;
-      if (p1.x === p2.x) {
-        if (p1.y === modpos(-p2.y, p)) return null;
-        k = (3n * p1.x * p1.x + P256.a) * modinv(2n * p1.y, p) % p;
-      } else {
-        k = (p2.y - p1.y) * modinv(p2.x - p1.x, p) % p;
-      }
-      const xr = modpos(k * k - p1.x - p2.x, p);
-      const yr = modpos(k * (p1.x - xr) - p1.y, p);
-      return { x: xr, y: yr };
-    }
-
-    function ecMul(pt, scalar) {
-      let result = null;
-      let base = pt;
-      scalar = modpos(scalar, P256.n);
-      while (scalar > 0n) {
-        if (scalar & 1n) result = ecAdd(result, base);
-        base = ecAdd(base, base);
-        scalar >>= 1n;
-      }
-      return result;
-    }
-
+    function ecAdd(p1, p2) { if (!p1) return p2; if (!p2) return p1; const { p } = P256; let k; if (p1.x === p2.x) { if (p1.y === modpos(-p2.y, p)) return null; k = (3n * p1.x * p1.x + P256.a) * modinv(2n * p1.y, p) % p; } else { k = (p2.y - p1.y) * modinv(p2.x - p1.x, p) % p; } const xr = modpos(k * k - p1.x - p2.x, p); const yr = modpos(k * (p1.x - xr) - p1.y, p); return { x: xr, y: yr }; }
+    function ecMul(pt, scalar) { let r = null; let base = pt; scalar = modpos(scalar, P256.n); while (scalar > 0n) { if (scalar & 1n) r = ecAdd(r, base); base = ecAdd(base, base); scalar >>= 1n; } return r; }
     const G = { x: P256.Gx, y: P256.Gy };
-
-    function pointToUncompressed(pt) {
-      const buf = new Uint8Array(65);
-      buf[0] = 0x04;
-      const xBytes = bigintToBytes(pt.x, 32);
-      const yBytes = bigintToBytes(pt.y, 32);
-      buf.set(xBytes, 1);
-      buf.set(yBytes, 33);
-      return buf;
-    }
-
-    function bytesToBigint(bytes) {
-      let result = 0n;
-      for (const b of bytes) result = (result << 8n) | BigInt(b);
-      return result;
-    }
-
-    function bigintToBytes(val, len) {
-      const bytes = new Uint8Array(len);
-      for (let i = len - 1; i >= 0; i--) {
-        bytes[i] = Number(val & 0xffn);
-        val >>= 8n;
-      }
-      return bytes;
-    }
+    function pointToUncompressed(pt) { const buf = new Uint8Array(65); buf[0] = 0x04; buf.set(bigintToBytes(pt.x, 32), 1); buf.set(bigintToBytes(pt.y, 32), 33); return buf; }
+    function bytesToBigint(bytes) { let r = 0n; for (const b of bytes) r = (r << 8n) | BigInt(b); return r; }
+    function bigintToBytes(val, len) { const b = new Uint8Array(len); for (let i = len - 1; i >= 0; i--) { b[i] = Number(val & 0xffn); val >>= 8n; } return b; }
+    function arrayToBase64url(arr) { return btoa(String.fromCharCode(...arr)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
 
     // =========================================================================
-    // expand_message_xmd (RFC 9380) with SHA-256
-    // Adapted from wallet-common/src/arkg/hash_to_curve.ts
+    // Crypto helpers (SHA-256, HKDF, expand_message_xmd, hash_to_scalar)
     // =========================================================================
 
-    async function sha256(data) {
-      return new Uint8Array(await crypto.subtle.digest('SHA-256', data));
-    }
-
-    function concatBytes(...arrays) {
-      const total = arrays.reduce((s, a) => s + a.length, 0);
-      const result = new Uint8Array(total);
-      let off = 0;
-      for (const a of arrays) { result.set(a, off); off += a.length; }
-      return result;
-    }
-
-    function xorBytes(a, b) {
-      const r = new Uint8Array(a.length);
-      for (let i = 0; i < a.length; i++) r[i] = a[i] ^ b[i];
-      return r;
-    }
+    async function sha256(data) { return new Uint8Array(await crypto.subtle.digest("SHA-256", data)); }
+    function concatBytes(...arrays) { const t = arrays.reduce((s, a) => s + a.length, 0); const r = new Uint8Array(t); let o = 0; for (const a of arrays) { r.set(a, o); o += a.length; } return r; }
+    function xorBytes(a, b) { const r = new Uint8Array(a.length); for (let i = 0; i < a.length; i++) r[i] = a[i] ^ b[i]; return r; }
 
     async function expandMessageXMD(msg, DST, lenInBytes) {
-      const bInBytes = 32; // SHA-256 output
-      const sInBytes = 64; // SHA-256 block size
-      const ell = Math.ceil(lenInBytes / bInBytes);
-
+      const bInBytes = 32, sInBytes = 64, ell = Math.ceil(lenInBytes / bInBytes);
       const DST_prime = concatBytes(DST, new Uint8Array([DST.length]));
-      const Z_pad = new Uint8Array(sInBytes);
-      const l_i_b_str = new Uint8Array([(lenInBytes >> 8) & 0xff, lenInBytes & 0xff]);
-
-      const msgPrime = concatBytes(Z_pad, msg, l_i_b_str, new Uint8Array([0x00]), DST_prime);
+      const msgPrime = concatBytes(new Uint8Array(sInBytes), msg, new Uint8Array([(lenInBytes >> 8) & 0xff, lenInBytes & 0xff]), new Uint8Array([0x00]), DST_prime);
       const b0 = await sha256(msgPrime);
-
-      const b = [b0];
-      b.push(await sha256(concatBytes(b0, new Uint8Array([0x01]), DST_prime)));
-
-      for (let i = 2; i <= ell; i++) {
-        const xored = xorBytes(b[0], b[i - 1]);
-        b.push(await sha256(concatBytes(xored, new Uint8Array([i]), DST_prime)));
-      }
-
-      const result = concatBytes(...b.slice(1));
-      return result.slice(0, lenInBytes);
+      const b = [b0]; b.push(await sha256(concatBytes(b0, new Uint8Array([0x01]), DST_prime)));
+      for (let i = 2; i <= ell; i++) b.push(await sha256(concatBytes(xorBytes(b[0], b[i - 1]), new Uint8Array([i]), DST_prime)));
+      return concatBytes(...b.slice(1)).slice(0, lenInBytes);
     }
 
-    // =========================================================================
-    // hash_to_scalar: hash to P-256 scalar field
-    // =========================================================================
-
     async function hashToScalar(msg, DST) {
-      const L = 48; // ceil((ceil(log2(n)) + 128) / 8) for P-256
-      const uniformBytes = await expandMessageXMD(msg, DST, L);
-      // Interpret as big-endian integer, reduce mod N
-      const val = bytesToBigint(uniformBytes);
-      return modpos(val, P256.n);
+      const uniformBytes = await expandMessageXMD(msg, DST, 48);
+      return modpos(bytesToBigint(uniformBytes), P256.n);
     }
 
     // =========================================================================
     // ARKG-P256 key derivation
-    // Adapted from wallet-common/src/arkg/index.ts
     // =========================================================================
 
-    const DST_EXT = new TextEncoder().encode('ARKG-P256');
+    const DST_EXT = new TextEncoder().encode("ARKG-P256");
 
-    function I2OSP(val, len) {
-      const buf = new Uint8Array(len);
-      for (let i = len - 1; i >= 0; i--) {
-        buf[i] = val & 0xff;
-        val >>= 8;
-      }
-      return buf;
-    }
-
-    // Parse ARKG public seed from COSE key (Map with integer keys)
     function parseArkgSeed(coseKey) {
-      // coseKey is a Map: {1: kty, 3: alg, -1: pkBl, -2: pkKem}
-      const pkBlCose = coseKey.get(-1); // pkBl is an EC2 COSE key
-      const pkKemCose = coseKey.get(-2); // pkKem is an EC2 COSE key
-      if (!pkBlCose || !pkKemCose) throw new Error('Missing pkBl or pkKem in COSE key');
-
-      return {
-        pkBl: coseEc2ToPoint(pkBlCose),
-        pkKem: coseEc2ToPoint(pkKemCose),
-      };
+      const pkBl = coseKey.get(-1), pkKem = coseKey.get(-2);
+      if (!pkBl || !pkKem) throw new Error("Missing pkBl or pkKem");
+      return { pkBl: coseEc2ToPoint(pkBl), pkKem: coseEc2ToPoint(pkKem) };
     }
-
-    function coseEc2ToPoint(coseKey) {
-      // coseKey is a Map: {1: 2 (kty=EC2), -1: 1 (crv=P-256), -2: x, -3: y}
-      const x = coseKey.get(-2); // Uint8Array
-      const y = coseKey.get(-3); // Uint8Array
-      if (!x || !y || x.length !== 32 || y.length !== 32) {
-        throw new Error('Invalid EC2 COSE key coordinates');
-      }
-      return { x: bytesToBigint(x), y: bytesToBigint(y) };
-    }
+    function coseEc2ToPoint(k) { const x = k.get(-2), y = k.get(-3); return { x: bytesToBigint(x), y: bytesToBigint(y) }; }
 
     async function arkgDerivePublicKey(seed, ikm, ctx) {
-      if (ctx.length > 64) throw new Error('ctx too long (max 64 bytes)');
-
       const ctxPrime = concatBytes(new Uint8Array([ctx.length]), ctx);
-      const ctxKem = concatBytes(new TextEncoder().encode('ARKG-Derive-Key-KEM.'), ctxPrime);
-      const ctxBl = concatBytes(new TextEncoder().encode('ARKG-Derive-Key-BL.'), ctxPrime);
-
-      // KEM encapsulate
+      const ctxKem = concatBytes(new TextEncoder().encode("ARKG-Derive-Key-KEM."), ctxPrime);
+      const ctxBl = concatBytes(new TextEncoder().encode("ARKG-Derive-Key-BL."), ctxPrime);
       const [ikmTau, c] = await hmacKemEncaps(seed.pkKem, ikm, ctxKem);
-
-      // BL PRF: hash to scalar with domain separation
-      const dstTau = concatBytes(
-        new TextEncoder().encode('ARKG-BL-EC.'), DST_EXT, ctxBl
-      );
-      const tau = await hashToScalar(new Uint8Array(ikmTau), dstTau);
-
-      // BL blind public key: pk + tau*G
-      const tauG = ecMul(G, tau);
-      const pkPrime = ecAdd(seed.pkBl, tauG);
-
-      return { publicKey: pkPrime, keyHandle: new Uint8Array(c) };
+      const tau = await hashToScalar(new Uint8Array(ikmTau), concatBytes(new TextEncoder().encode("ARKG-BL-EC."), DST_EXT, ctxBl));
+      return { publicKey: ecAdd(seed.pkBl, ecMul(G, tau)), keyHandle: new Uint8Array(c) };
     }
 
-    // ECDH-KEM with HMAC wrapper
     async function hmacKemEncaps(pkKem, ikm, ctx) {
-      const DST_aug = new TextEncoder().encode('ARKG-ECDH.ARKG-P256');
-
-      // Generate ephemeral keypair from IKM via hash_to_scalar
-      const dstKemSk = concatBytes(
-        new TextEncoder().encode('ARKG-KEM-ECDH-KG.'), DST_aug
-      );
-      const ephSk = await hashToScalar(ikm, dstKemSk);
+      const DST_aug = new TextEncoder().encode("ARKG-ECDH.ARKG-P256");
+      const ephSk = await hashToScalar(ikm, concatBytes(new TextEncoder().encode("ARKG-KEM-ECDH-KG."), DST_aug));
       const ephPk = ecMul(G, ephSk);
-
-      // Import pkKem as WebCrypto ECDH key
-      const pkKemRaw = pointToUncompressed(pkKem);
-      const pkKemCryptoKey = await crypto.subtle.importKey(
-        'raw', pkKemRaw, { name: 'ECDH', namedCurve: 'P-256' }, false, []
-      );
-
-      // Import ephemeral private key as WebCrypto ECDH key
-      const ephPkPoint = ecMul(G, ephSk);
-      const ephSkCryptoKey = await crypto.subtle.importKey('jwk', {
-        kty: 'EC', crv: 'P-256',
-        x: arrayToBase64url(bigintToBytes(ephPkPoint.x, 32)),
-        y: arrayToBase64url(bigintToBytes(ephPkPoint.y, 32)),
-        d: arrayToBase64url(bigintToBytes(ephSk, 32)),
-      }, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
-
-      // ECDH: shared secret = x-coordinate of pkKem * ephSk
-      const sharedBits = await crypto.subtle.deriveBits(
-        { name: 'ECDH', public: pkKemCryptoKey }, ephSkCryptoKey, 256
-      );
-      const kPrime = new Uint8Array(sharedBits);
-
-      // Ephemeral public key as uncompressed point
+      const pkKemCryptoKey = await crypto.subtle.importKey("raw", pointToUncompressed(pkKem), { name: "ECDH", namedCurve: "P-256" }, false, []);
+      const ephSkCryptoKey = await crypto.subtle.importKey("jwk", { kty: "EC", crv: "P-256", x: arrayToBase64url(bigintToBytes(ephPk.x, 32)), y: arrayToBase64url(bigintToBytes(ephPk.y, 32)), d: arrayToBase64url(bigintToBytes(ephSk, 32)) }, { name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+      const kPrime = new Uint8Array(await crypto.subtle.deriveBits({ name: "ECDH", public: pkKemCryptoKey }, ephSkCryptoKey, 256));
       const cPrime = pointToUncompressed(ephPk);
-
-      // HMAC-KEM wrapper (matches Rust hmac_kem_encaps and TS arkgHmacKem)
-      // Note: the TS code wraps SubKem with ctx_sub = "ARKG-KEM-HMAC." || DST_ext || ctx
-      // But the Rust code uses DST_aug = "ARKG-ECDH.ARKG-P256" directly in the HMAC-KEM.
-      // The HMAC-KEM ctx parameter is already ctx_kem from above.
-      // The TS passes ctx_sub = "ARKG-KEM-HMAC." || DST_aug || ctx to the inner KEM,
-      // but the inner KEM ignores ctx (see encaps: _ctx is unused).
-      // The HMAC-KEM mac info = "ARKG-KEM-HMAC-mac." || DST_aug || ctx
-      // and shared info = "ARKG-KEM-HMAC-shared." || DST_aug || ctx
-
-      const macInfo = concatBytes(
-        new TextEncoder().encode('ARKG-KEM-HMAC-mac.'), DST_aug, ctx
-      );
-      const sharedInfo = concatBytes(
-        new TextEncoder().encode('ARKG-KEM-HMAC-shared.'), DST_aug, ctx
-      );
-
-      // HKDF-SHA256 for MAC key
-      const hkdfKey = await crypto.subtle.importKey(
-        'raw', kPrime, { name: 'HKDF' }, false, ['deriveBits', 'deriveKey']
-      );
-
-      const mk = await crypto.subtle.deriveKey(
-        { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array([]), info: macInfo },
-        hkdfKey,
-        { name: 'HMAC', hash: 'SHA-256', length: 256 },
-        false, ['sign']
-      );
-
-      const macFull = new Uint8Array(await crypto.subtle.sign('HMAC', mk, cPrime));
-      const t = macFull.slice(0, 16);
-
-      // HKDF-SHA256 for shared secret
-      const k = new Uint8Array(await crypto.subtle.deriveBits(
-        { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array([]), info: sharedInfo },
-        hkdfKey,
-        kPrime.length * 8
-      ));
-
-      // Ciphertext = MAC tag || ephemeral public key
-      const c = concatBytes(t, cPrime);
-
-      return [k, c];
+      const macInfo = concatBytes(new TextEncoder().encode("ARKG-KEM-HMAC-mac."), DST_aug, ctx);
+      const sharedInfo = concatBytes(new TextEncoder().encode("ARKG-KEM-HMAC-shared."), DST_aug, ctx);
+      const hkdfKey = await crypto.subtle.importKey("raw", kPrime, { name: "HKDF" }, false, ["deriveBits", "deriveKey"]);
+      const mk = await crypto.subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array([]), info: macInfo }, hkdfKey, { name: "HMAC", hash: "SHA-256", length: 256 }, false, ["sign"]);
+      const t = new Uint8Array(await crypto.subtle.sign("HMAC", mk, cPrime)).slice(0, 16);
+      const k = new Uint8Array(await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array([]), info: sharedInfo }, hkdfKey, kPrime.length * 8));
+      return [k, concatBytes(t, cPrime)];
     }
 
-    function arrayToBase64url(arr) {
-      return btoa(String.fromCharCode(...arr))
-        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    }
+    function encodeCoseSignArgs(alg, arkgKh, ctx) { const m = new Map(); m.set(3, alg); m.set(-1, arkgKh); m.set(-2, ctx); return encodeCBOR(m); }
 
-    // Encode COSE_Sign_Args: {3: alg, -1: arkg_kh, -2: ctx}
-    function encodeCoseSignArgs(alg, arkgKh, ctx) {
-      const map = new Map();
-      map.set(3, alg);
-      map.set(-1, arkgKh);
-      map.set(-2, ctx);
-      return encodeCBOR(map);
+    // =========================================================================
+    // State
+    // =========================================================================
+
+    let regResult = null; // { credentialId, extResults }
+
+    // =========================================================================
+    // Main test flow
+    // =========================================================================
+
+    async function runAll() {
+      logEl.textContent = "";
+      initSummary();
+      document.getElementById("btn-register").disabled = true;
+
+      try {
+        await doRegister();
+        if (regResult) {
+          await doAuthenticate();
+          await doLargeBlobLifecycle();
+        }
+      } catch (e) {
+        log("Fatal: " + e.message, "error");
+        log(e.stack || "", "error");
+      } finally {
+        document.getElementById("btn-register").disabled = false;
+      }
     }
 
     // =========================================================================
-    // WebAuthn test functions
+    // 1. MakeCredential
     // =========================================================================
 
     async function doRegister() {
-      log('--- MakeCredential with previewSign ---', 'status');
-      const registerBtn = document.getElementById('register-btn');
-      registerBtn.disabled = true;
+      log("=== MakeCredential ===", "status");
+      const challenge = crypto.getRandomValues(new Uint8Array(32));
+      const userId = crypto.getRandomValues(new Uint8Array(16));
+      const prfSalt1 = crypto.getRandomValues(new Uint8Array(32));
+      const prfSalt2 = crypto.getRandomValues(new Uint8Array(32));
+      const credBlobText = document.getElementById("cred-blob-input").value;
 
-      try {
-        const challenge = crypto.getRandomValues(new Uint8Array(32));
-        const userId = crypto.getRandomValues(new Uint8Array(16));
-        const prfCreateSalt1 = crypto.getRandomValues(new Uint8Array(32));
-        const prfCreateSalt2 = crypto.getRandomValues(new Uint8Array(32));
-
-        const options = {
-          publicKey: {
-            rp: { id: location.hostname, name: 'previewSign Test' },
-            user: {
-              id: userId,
-              name: 'testuser@example.com',
-              displayName: 'Test User'
-            },
-            challenge: challenge,
-            pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
-            authenticatorSelection: {
-              residentKey: 'required',
-              userVerification: 'required'
-            },
-            timeout: 120000,
-            extensions: {
-              previewSign: {
-                generateKey: {
-                  algorithms: [-65539]  // ESP256-ARKG
-                }
-              },
-              hmacCreateSecret: true,
-              credProps: true,
-              credentialProtectionPolicy: 'userVerificationRequired',
-              prf: {
-                eval: {
-                  first: prfCreateSalt1.buffer,
-                  second: prfCreateSalt2.buffer,
-                }
-              },
-            }
-          }
-        };
-
-        log('Options: ' + JSON.stringify({
-          rp: options.publicKey.rp,
+      const options = {
+        publicKey: {
+          rp: { id: location.hostname, name: "Sign Extension Test" },
+          user: { id: userId, name: "testuser@example.com", displayName: "Test User" },
+          challenge,
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+          authenticatorSelection: { residentKey: "required", userVerification: "required" },
+          timeout: 120000,
           extensions: {
-            ...options.publicKey.extensions,
-            prf: {
-              eval: {
-                first: hex(prfCreateSalt1),
-                second: hex(prfCreateSalt2),
-              }
-            }
-          }
-        }, null, 2));
+            previewSign: { generateKey: { algorithms: [-65539] } },
+            hmacCreateSecret: true,
+            credProps: true,
+            credentialProtectionPolicy: "userVerificationRequired",
+            prf: { eval: { first: prfSalt1.buffer, second: prfSalt2.buffer } },
+            credBlob: new TextEncoder().encode(credBlobText),
+            largeBlob: { support: "preferred" },
+          },
+        },
+      };
 
-        log('Touch your YubiKey...', 'status');
-        const credential = await navigator.credentials.create(options);
-        log('Registration succeeded!', 'success');
-
-        log('\nCredential ID: ' + b64url(credential.rawId));
-        log('Type: ' + credential.type);
-
-        if (credential.response) {
-          log('clientDataJSON: ' + b64url(credential.response.clientDataJSON));
-          log('attestationObject: ' + b64url(credential.response.attestationObject) + ' (' + credential.response.attestationObject.byteLength + ' bytes)');
-        }
-
-        // Check extension results
-        const extResults = credential.getClientExtensionResults
-          ? credential.getClientExtensionResults()
-          : (credential.clientExtensionResults || {});
-
-        log('\nClient extension results: ' + JSON.stringify(extResults, null, 2));
-
-        if (extResults.previewSign) {
-          log('previewSign output present!', 'success');
-          const ps = extResults.previewSign;
-          if (ps.generatedKey) {
-            const khDisplay = (ps.generatedKey.keyHandle instanceof ArrayBuffer ||
-              ps.generatedKey.keyHandle instanceof Uint8Array)
-              ? b64url(ps.generatedKey.keyHandle)
-              : ps.generatedKey.keyHandle;
-            const pkDisplay = (ps.generatedKey.publicKey instanceof ArrayBuffer ||
-              ps.generatedKey.publicKey instanceof Uint8Array)
-              ? b64url(ps.generatedKey.publicKey)
-              : ps.generatedKey.publicKey;
-            log('  keyHandle: ' + khDisplay + ' (' +
-              (ps.generatedKey.keyHandle.byteLength || ps.generatedKey.keyHandle.length) + ' bytes)');
-            log('  publicKey: ' + pkDisplay + ' (' +
-              (ps.generatedKey.publicKey.byteLength || ps.generatedKey.publicKey.length) + ' bytes)');
-            log('  algorithm: ' + ps.generatedKey.algorithm);
-
-            // Parse and display ARKG public seed
-            try {
-              const pkBytes = ps.generatedKey.publicKey instanceof ArrayBuffer
-                ? new Uint8Array(ps.generatedKey.publicKey)
-                : (ps.generatedKey.publicKey instanceof Uint8Array
-                  ? ps.generatedKey.publicKey
-                  : b64urlDecode(ps.generatedKey.publicKey));
-              const coseKey = decodeCBOR(pkBytes);
-              const seed = parseArkgSeed(coseKey);
-              log('  ARKG pkBl.x:  ' + seed.pkBl.x.toString(16));
-              log('  ARKG pkKem.x: ' + seed.pkKem.x.toString(16));
-              log('  ARKG seed parsed successfully', 'success');
-            } catch (e) {
-              log('  Warning: could not parse ARKG seed: ' + e.message, 'error');
-            }
-          }
-        } else {
-          log('No previewSign in extension results', 'error');
-        }
-
-        // hmacCreateSecret result
-        if (extResults.hmacCreateSecret !== undefined) {
-          log('hmacCreateSecret: ' + extResults.hmacCreateSecret, extResults.hmacCreateSecret ? 'success' : 'error');
-        } else {
-          log('hmacCreateSecret: not in results (authenticator may not support it)');
-        }
-
-        // credProps result
-        if (extResults.credProps) {
-          log('credProps.rk: ' + extResults.credProps.rk, 'success');
-        } else {
-          log('credProps: not in results');
-        }
-
-        // prf result (MakeCredential returns { enabled: true/false, results?: ... })
-        if (extResults.prf) {
-          log('prf.enabled: ' + extResults.prf.enabled, extResults.prf.enabled ? 'success' : 'error');
-          if (extResults.prf.results) {
-            const first = extResults.prf.results.first;
-            const firstBytes = new Uint8Array(first instanceof ArrayBuffer ? first : first.buffer || first);
-            log('  prf.results.first:  ' + hex(firstBytes) + ' (' + firstBytes.length + ' bytes)', 'success');
-            if (extResults.prf.results.second) {
-              const second = extResults.prf.results.second;
-              const secondBytes = new Uint8Array(second instanceof ArrayBuffer ? second : second.buffer || second);
-              log('  prf.results.second: ' + hex(secondBytes) + ' (' + secondBytes.length + ' bytes)', 'success');
-            }
-          }
-        } else {
-          log('prf: not in results');
-        }
-
-        // Store for signing
-        regResult = {
-          credentialId: new Uint8Array(credential.rawId),
-          extResults: extResults
-        };
-        document.getElementById('sign-btn').disabled = false;
-
+      log("Touch your security key...", "status");
+      let credential;
+      try {
+        credential = await navigator.credentials.create(options);
       } catch (e) {
-        log('Error: ' + e.message, 'error');
-        log(e.stack || '', 'error');
-      } finally {
-        registerBtn.disabled = false;
-      }
-    }
-
-    async function doSign() {
-      if (!regResult) {
-        log('Register first!', 'error');
+        fail("create-ok", e.message);
+        log("MakeCredential failed: " + e.message, "error");
         return;
       }
 
-      log('\n--- GetAssertion with previewSign + ARKG ---', 'status');
-      const signBtn = document.getElementById('sign-btn');
-      signBtn.disabled = true;
+      pass("create-ok");
+      log("Credential ID: " + b64url(credential.rawId), "success");
 
-      try {
-        const challenge = crypto.getRandomValues(new Uint8Array(32));
-        const tbsRaw = new TextEncoder().encode('Hello, previewSign v4!');
-        const tbsHash = new Uint8Array(await crypto.subtle.digest('SHA-256', tbsRaw));
-        log('TBS: "Hello, previewSign v4!"');
-        log('TBS hash: ' + hex(tbsHash));
+      const ext = credential.getClientExtensionResults
+        ? credential.getClientExtensionResults()
+        : (credential.clientExtensionResults || {});
+      log("clientExtensionResults: " + JSON.stringify(ext, null, 2));
 
-        const credIdB64 = b64url(regResult.credentialId);
-        const signByCredential = {};
+      // Check each extension
+      if (ext.previewSign?.generatedKey) {
+        pass("previewsign-key", `kh=${byteLen(ext.previewSign.generatedKey.keyHandle)}B pk=${byteLen(ext.previewSign.generatedKey.publicKey)}B`);
+        pass("previewsign-alg", `${ext.previewSign.generatedKey.algorithm}`);
+      } else {
+        fail("previewsign-key"); fail("previewsign-alg");
+      }
 
-        const ps = regResult.extResults.previewSign;
-        if (ps && ps.generatedKey) {
-          // Get the original key handle from MakeCredential
-          const origKh = (ps.generatedKey.keyHandle instanceof ArrayBuffer ||
-            ps.generatedKey.keyHandle instanceof Uint8Array)
-            ? new Uint8Array(ps.generatedKey.keyHandle)
-            : b64urlDecode(ps.generatedKey.keyHandle);
+      if (ext.prf?.enabled === true) pass("prf-enabled"); else fail("prf-enabled", String(ext.prf?.enabled));
+      if (ext.prf?.results?.first) pass("prf-mc-results", `first=${byteLen(ext.prf.results.first)}B`); else skip("prf-mc-results", "no hmac-secret-mc");
+      if (ext.credProps?.rk != null) pass("credprops-rk", `rk=${ext.credProps.rk}`); else fail("credprops-rk");
+      if (ext.credentialProtectionPolicy != null) pass("credprotect", `level ${ext.credentialProtectionPolicy}`); else skip("credprotect");
+      if (ext.credBlob === true) pass("credblob-set"); else fail("credblob-set", String(ext.credBlob));
+      if (ext.largeBlob?.supported === true) pass("largeblob-supported"); else skip("largeblob-supported", ext.largeBlob?.supported === false ? "not supported" : "not in results");
 
-          // Parse ARKG public seed from the COSE key
-          const pkBytes = (ps.generatedKey.publicKey instanceof ArrayBuffer ||
-            ps.generatedKey.publicKey instanceof Uint8Array)
-            ? new Uint8Array(ps.generatedKey.publicKey)
-            : b64urlDecode(ps.generatedKey.publicKey);
-          const coseKey = decodeCBOR(pkBytes);
-          const seed = parseArkgSeed(coseKey);
-          log('Parsed ARKG seed from MakeCredential publicKey', 'success');
+      regResult = { credentialId: new Uint8Array(credential.rawId), extResults: ext };
+    }
 
-          // ARKG key derivation
+    // =========================================================================
+    // 2. GetAssertion
+    // =========================================================================
+
+    async function doAuthenticate() {
+      if (!regResult) return;
+      log("\n=== GetAssertion ===", "status");
+
+      const challenge = crypto.getRandomValues(new Uint8Array(32));
+      const prfSalt1 = crypto.getRandomValues(new Uint8Array(32));
+      const prfSalt2 = crypto.getRandomValues(new Uint8Array(32));
+      const tbsRaw = new TextEncoder().encode("Hello, previewSign v4!");
+      const tbsHash = new Uint8Array(await crypto.subtle.digest("SHA-256", tbsRaw));
+
+      // Build previewSign signByCredential with ARKG
+      const credIdB64 = b64url(regResult.credentialId);
+      const signByCredential = {};
+      let derivedPk = null;
+      const ps = regResult.extResults.previewSign;
+
+      if (ps?.generatedKey) {
+        try {
+          const origKh = toBytes(ps.generatedKey.keyHandle);
+          const pkBytes = toBytes(ps.generatedKey.publicKey);
+          const seed = parseArkgSeed(decodeCBOR(pkBytes));
           const arkgIkm = crypto.getRandomValues(new Uint8Array(32));
-          const arkgCtx = new TextEncoder().encode('previewSign-test');
-          log('ARKG IKM: ' + hex(arkgIkm));
-          log('ARKG ctx: "previewSign-test"');
-
-          log('Deriving ARKG public key...', 'status');
+          const arkgCtx = new TextEncoder().encode("previewSign-test");
           const derived = await arkgDerivePublicKey(seed, arkgIkm, arkgCtx);
-          log('ARKG derived pk: ' + hex(pointToUncompressed(derived.publicKey)));
-          log('ARKG key handle: ' + hex(derived.keyHandle) + ' (' + derived.keyHandle.length + ' bytes)');
-
-          // Encode COSE_Sign_Args: {3: alg, -1: arkg_kh, -2: ctx}
+          derivedPk = derived.publicKey;
           const additionalArgs = encodeCoseSignArgs(-65539, derived.keyHandle, arkgCtx);
-          log('COSE_Sign_Args: ' + hex(additionalArgs) + ' (' + additionalArgs.length + ' bytes)');
-
-          signByCredential[credIdB64] = {
-            keyHandle: origKh,
-            tbs: tbsHash,
-            additionalArgs: additionalArgs
-          };
-          log('signByCredential entry built with additionalArgs', 'success');
+          signByCredential[credIdB64] = { keyHandle: origKh, tbs: tbsHash, additionalArgs };
+          log("ARKG key derived, additionalArgs=" + additionalArgs.length + "B");
+        } catch (e) {
+          log("ARKG derivation failed: " + e.message, "error");
         }
+      }
 
-        // PRF eval salts (32 bytes each)
-        const prfSalt1 = crypto.getRandomValues(new Uint8Array(32));
-        const prfSalt2 = crypto.getRandomValues(new Uint8Array(32));
-        log('PRF salt1: ' + hex(prfSalt1));
-        log('PRF salt2: ' + hex(prfSalt2));
+      const options = {
+        publicKey: {
+          rpId: location.hostname,
+          challenge,
+          allowCredentials: [{ type: "public-key", id: regResult.credentialId }],
+          userVerification: "preferred",
+          timeout: 120000,
+          extensions: {
+            previewSign: { signByCredential },
+            prf: { eval: { first: prfSalt1.buffer, second: prfSalt2.buffer } },
+            getCredBlob: true,
+          },
+        },
+      };
 
-        const options = {
-          publicKey: {
-            rpId: location.hostname,
-            challenge: challenge,
-            allowCredentials: [{
-              type: 'public-key',
-              id: regResult.credentialId
-            }],
-            userVerification: 'preferred',
-            timeout: 120000,
-            extensions: {
-              previewSign: {
-                signByCredential: signByCredential
-              },
-              prf: {
-                eval: {
-                  first: prfSalt1.buffer,
-                  second: prfSalt2.buffer,
-                }
-              },
-            }
-          }
-        };
-
-        log('Sending GetAssertion...', 'status');
-        log('Touch your YubiKey...', 'status');
-        const assertion = await navigator.credentials.get(options);
-        log('Authentication succeeded!', 'success');
-
-        log('\nCredential ID: ' + b64url(assertion.rawId));
-
-        if (assertion.response) {
-          log('authenticatorData: ' + b64url(assertion.response.authenticatorData) + ' (' + assertion.response.authenticatorData.byteLength + ' bytes)');
-          log('signature: ' + b64url(assertion.response.signature) + ' (' + assertion.response.signature.byteLength + ' bytes)');
-        }
-
-        const extResults = assertion.getClientExtensionResults
-          ? assertion.getClientExtensionResults()
-          : (assertion.clientExtensionResults || {});
-
-        log('\nClient extension results: ' + JSON.stringify(extResults, null, 2));
-
-        if (extResults.previewSign && extResults.previewSign.signature) {
-          log('previewSign signature present!', 'success');
-          const sig = extResults.previewSign.signature;
-          const sigBytes = (sig instanceof ArrayBuffer || sig instanceof Uint8Array)
-            ? new Uint8Array(sig) : b64urlDecode(sig);
-          log('  signature: ' + hex(sigBytes) + ' (' + sigBytes.length + ' bytes)');
-        }
-
-        // PRF results (GetAssertion returns { results: { first, second? } })
-        if (extResults.prf) {
-          if (extResults.prf.results) {
-            log('prf results present!', 'success');
-            const first = extResults.prf.results.first;
-            const firstBytes = (first instanceof ArrayBuffer) ? new Uint8Array(first)
-              : (first instanceof Uint8Array) ? first : b64urlDecode(first);
-            log('  prf.results.first:  ' + hex(firstBytes) + ' (' + firstBytes.length + ' bytes)');
-            if (extResults.prf.results.second) {
-              const second = extResults.prf.results.second;
-              const secondBytes = (second instanceof ArrayBuffer) ? new Uint8Array(second)
-                : (second instanceof Uint8Array) ? second : b64urlDecode(second);
-              log('  prf.results.second: ' + hex(secondBytes) + ' (' + secondBytes.length + ' bytes)');
-            }
-          } else {
-            log('prf: no results (enabled=' + extResults.prf.enabled + ')');
-          }
-        } else {
-          log('prf: not in results');
-        }
-
+      log("Touch your security key...", "status");
+      let assertion;
+      try {
+        assertion = await navigator.credentials.get(options);
       } catch (e) {
-        log('Error: ' + e.message, 'error');
-        log(e.stack || '', 'error');
-      } finally {
-        signBtn.disabled = false;
+        fail("get-ok", e.message);
+        log("GetAssertion failed: " + e.message, "error");
+        return;
+      }
+
+      pass("get-ok");
+      const ext = assertion.getClientExtensionResults
+        ? assertion.getClientExtensionResults()
+        : (assertion.clientExtensionResults || {});
+      log("clientExtensionResults: " + JSON.stringify(ext, null, 2));
+
+      // Check extensions
+      if (ext.previewSign?.signature) {
+        const sigBytes = toBytes(ext.previewSign.signature);
+        pass("previewsign-sig", `${sigBytes?.length || 0} bytes`);
+      } else {
+        fail("previewsign-sig");
+      }
+
+      if (ext.prf?.results?.first) pass("prf-first", `${byteLen(ext.prf.results.first)} bytes`); else fail("prf-first");
+      if (ext.prf?.results?.second) pass("prf-second", `${byteLen(ext.prf.results.second)} bytes`); else fail("prf-second");
+
+      if (ext.credBlob != null) {
+        const blobBytes = toBytes(ext.credBlob);
+        if (blobBytes) {
+          const blobText = new TextDecoder().decode(blobBytes);
+          pass("credblob-get", `"${blobText}" (${blobBytes.length}B)`);
+        } else {
+          pass("credblob-get", String(ext.credBlob));
+        }
+      } else {
+        fail("credblob-get");
+      }
+
+      // ARKG signature verification (if we derived a key)
+      if (derivedPk && ext.previewSign?.signature) {
+        try {
+          const sigBytes = toBytes(ext.previewSign.signature);
+          const pkRaw = pointToUncompressed(derivedPk);
+          const verifyKey = await crypto.subtle.importKey("raw", pkRaw, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+          const valid = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, verifyKey, sigBytes, tbsHash);
+          if (valid) pass("arkg-verify"); else fail("arkg-verify", "signature invalid");
+        } catch (e) {
+          fail("arkg-verify", e.message);
+        }
+      } else {
+        skip("arkg-verify", "no previewSign signature or derived key");
       }
     }
+
+    // =========================================================================
+    // 3. LargeBlob lifecycle (auto-runs after authenticate)
+    // =========================================================================
+
+    async function doLargeBlobLifecycle() {
+      if (!regResult) return;
+      if (!regResult.extResults.largeBlob?.supported) {
+        skip("lb-read-empty", "largeBlob not supported");
+        skip("lb-write", "largeBlob not supported");
+        skip("lb-readback", "largeBlob not supported");
+        return;
+      }
+
+      log("\n=== LargeBlob Lifecycle ===", "status");
+      const baseOpts = () => ({
+        publicKey: {
+          rpId: location.hostname,
+          challenge: crypto.getRandomValues(new Uint8Array(32)),
+          allowCredentials: [{ type: "public-key", id: regResult.credentialId }],
+          userVerification: "preferred",
+          timeout: 120000,
+        },
+      });
+
+      // Step 1: Read (expect empty)
+      try {
+        log("Step 1: Reading largeBlob (expect empty)...", "status");
+        const opts1 = baseOpts();
+        opts1.publicKey.extensions = { largeBlob: { read: true } };
+        const r1 = await navigator.credentials.get(opts1);
+        const ext1 = r1.getClientExtensionResults ? r1.getClientExtensionResults() : {};
+        const blob1 = ext1.largeBlob?.blob;
+        if (!blob1 || byteLen(blob1) === 0) {
+          pass("lb-read-empty", "empty as expected");
+        } else {
+          pass("lb-read-empty", `got ${byteLen(blob1)}B (pre-existing data)`);
+        }
+      } catch (e) {
+        fail("lb-read-empty", e.message);
+        return;
+      }
+
+      // Step 2: Write
+      const testData = document.getElementById("large-blob-input").value + " @ " + new Date().toISOString();
+      try {
+        log("Step 2: Writing largeBlob: \"" + testData + "\"", "status");
+        const opts2 = baseOpts();
+        opts2.publicKey.extensions = { largeBlob: { write: new TextEncoder().encode(testData) } };
+        const r2 = await navigator.credentials.get(opts2);
+        const ext2 = r2.getClientExtensionResults ? r2.getClientExtensionResults() : {};
+        if (ext2.largeBlob?.written === true) {
+          pass("lb-write");
+        } else {
+          fail("lb-write", "written=" + ext2.largeBlob?.written);
+        }
+      } catch (e) {
+        fail("lb-write", e.message);
+        return;
+      }
+
+      // Step 3: Read back
+      try {
+        log("Step 3: Reading back largeBlob...", "status");
+        const opts3 = baseOpts();
+        opts3.publicKey.extensions = { largeBlob: { read: true } };
+        const r3 = await navigator.credentials.get(opts3);
+        const ext3 = r3.getClientExtensionResults ? r3.getClientExtensionResults() : {};
+        const blob3 = ext3.largeBlob?.blob;
+        if (blob3) {
+          const readBack = new TextDecoder().decode(toBytes(blob3));
+          if (readBack === testData) {
+            pass("lb-readback", `"${readBack.slice(0, 30)}..."`);
+          } else {
+            fail("lb-readback", `mismatch: got "${readBack.slice(0, 30)}"`);
+          }
+        } else {
+          fail("lb-readback", "no blob returned");
+        }
+      } catch (e) {
+        fail("lb-readback", e.message);
+      }
+    }
+
+    // Initialize
+    initSummary();
   </script>
 </body>
 </html>
