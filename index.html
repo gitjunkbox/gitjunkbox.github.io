@@ -354,6 +354,50 @@
 
     function encodeCoseSignArgs(alg, arkgKh, ctx) { const m = new Map(); m.set(3, alg); m.set(-1, arkgKh); m.set(-2, ctx); return encodeCBOR(m); }
 
+    // Raw ECDSA P-256 verification (pre-hashed message, no double-hashing)
+    // WebCrypto always hashes before verifying; the authenticator signs a pre-hashed TBS,
+    // so we need raw verification.
+    function verifyEcdsaP256Raw(pubKeyPoint, signature, msgHash) {
+      // Parse signature: try raw r||s (64 bytes) or DER
+      let r, s;
+      const sigBytes = toBytes(signature);
+      if (sigBytes.length === 64) {
+        r = bytesToBigint(sigBytes.slice(0, 32));
+        s = bytesToBigint(sigBytes.slice(32));
+      } else {
+        // DER decode
+        const parsed = parseDerSignature(sigBytes);
+        if (!parsed) return false;
+        r = parsed.r; s = parsed.s;
+      }
+
+      if (r < 1n || r >= P256.n || s < 1n || s >= P256.n) return false;
+      const z = bytesToBigint(toBytes(msgHash).slice(0, 32));
+      const sInv = modinv(s, P256.n);
+      const u1 = modpos(z * sInv, P256.n);
+      const u2 = modpos(r * sInv, P256.n);
+      const p = ecAdd(ecMul(G, u1), ecMul(pubKeyPoint, u2));
+      if (!p) return false;
+      return modpos(p.x, P256.n) === r;
+    }
+
+    function parseDerSignature(der) {
+      try {
+        if (der[0] !== 0x30) return null;
+        let offset = 2; // skip SEQUENCE tag + length
+        if (der[1] & 0x80) offset += (der[1] & 0x7f); // long form length
+        // r
+        if (der[offset] !== 0x02) return null;
+        const rLen = der[offset + 1]; offset += 2;
+        const rBytes = der.slice(offset, offset + rLen); offset += rLen;
+        // s
+        if (der[offset] !== 0x02) return null;
+        const sLen = der[offset + 1]; offset += 2;
+        const sBytes = der.slice(offset, offset + sLen);
+        return { r: bytesToBigint(rBytes), s: bytesToBigint(sBytes) };
+      } catch { return null; }
+    }
+
     // =========================================================================
     // State
     // =========================================================================
@@ -544,13 +588,10 @@
         fail("credblob-get");
       }
 
-      // ARKG signature verification (if we derived a key)
+      // ARKG signature verification (raw ECDSA — authenticator signs pre-hashed TBS)
       if (derivedPk && ext.previewSign?.signature) {
         try {
-          const sigBytes = toBytes(ext.previewSign.signature);
-          const pkRaw = pointToUncompressed(derivedPk);
-          const verifyKey = await crypto.subtle.importKey("raw", pkRaw, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
-          const valid = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, verifyKey, sigBytes, tbsHash);
+          const valid = verifyEcdsaP256Raw(derivedPk, ext.previewSign.signature, tbsHash);
           if (valid) pass("arkg-verify"); else fail("arkg-verify", "signature invalid");
         } catch (e) {
           fail("arkg-verify", e.message);
