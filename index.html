@@ -404,6 +404,17 @@
 
     let regResult = null; // { credentialId, extResults }
 
+    function waitForUserClick(label) {
+      return new Promise(resolve => {
+        const btn = document.createElement("button");
+        btn.textContent = label;
+        btn.style.cssText = "background:#FF9800;margin:8px 0;";
+        btn.onclick = () => { btn.remove(); resolve(); };
+        document.getElementById("summary").after(btn);
+        log("Click '" + label + "' to continue...", "status");
+      });
+    }
+
     // =========================================================================
     // Main test flow
     // =========================================================================
@@ -417,6 +428,11 @@
         await doRegister();
         if (regResult) {
           await doAuthenticate();
+          // largeBlob read-back needs a fresh user gesture (Safari requires it).
+          // Show a button and wait for click.
+          if (regResult?.largeBlobWrittenData) {
+            await waitForUserClick("Verify LargeBlob Read Back");
+          }
           await doLargeBlobReadBack();
         }
       } catch (e) {
