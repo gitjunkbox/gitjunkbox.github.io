@@ -591,10 +591,15 @@
       // ARKG signature verification (raw ECDSA — authenticator signs pre-hashed TBS)
       if (derivedPk && ext.previewSign?.signature) {
         try {
-          const valid = verifyEcdsaP256Raw(derivedPk, ext.previewSign.signature, tbsHash);
+          const sigForVerify = toBytes(ext.previewSign.signature);
+          log("ARKG verify: sig=" + hex(sigForVerify) + " (" + sigForVerify.length + "B)");
+          log("ARKG verify: tbsHash=" + hex(tbsHash));
+          log("ARKG verify: derivedPk=(" + derivedPk.x.toString(16).slice(0,16) + "...)");
+          const valid = verifyEcdsaP256Raw(derivedPk, sigForVerify, tbsHash);
           if (valid) pass("arkg-verify"); else fail("arkg-verify", "signature invalid");
         } catch (e) {
           fail("arkg-verify", e.message);
+          log("ARKG verify error: " + e.stack, "error");
         }
       } else {
         skip("arkg-verify", "no previewSign signature or derived key");
