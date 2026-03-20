@@ -493,10 +493,15 @@
         : (credential.clientExtensionResults || {});
       log("clientExtensionResults: " + JSON.stringify(ext, null, 2));
 
-      // Check each extension
-      if (ext.previewSign?.generatedKey) {
-        pass("previewsign-key", `kh=${byteLen(ext.previewSign.generatedKey.keyHandle)}B pk=${byteLen(ext.previewSign.generatedKey.publicKey)}B`);
-        pass("previewsign-alg", `${ext.previewSign.generatedKey.algorithm}`);
+      // Check each extension — previewSign requires non-empty keyHandle AND non-zero algorithm
+      const psKey = ext.previewSign?.generatedKey;
+      const psKeyValid = psKey && byteLen(psKey.keyHandle) > 0 && psKey.algorithm !== 0;
+      if (psKeyValid) {
+        pass("previewsign-key", `kh=${byteLen(psKey.keyHandle)}B pk=${byteLen(psKey.publicKey)}B`);
+        pass("previewsign-alg", `${psKey.algorithm}`);
+      } else if (psKey && psKey.algorithm === 0) {
+        skip("previewsign-key", "previewSign not enabled on this key");
+        skip("previewsign-alg", "previewSign not enabled on this key");
       } else {
         fail("previewsign-key"); fail("previewsign-alg");
       }
@@ -527,13 +532,14 @@
       const tbsHash = new Uint8Array(await crypto.subtle.digest("SHA-256", tbsRaw));
       const largeBlobTestData = document.getElementById("large-blob-input").value + " @ " + new Date().toISOString();
 
-      // Build previewSign signByCredential with ARKG
+      // Build previewSign signByCredential with ARKG (only if MakeCredential returned valid previewSign data)
       const credIdB64 = b64url(regResult.credentialId);
       const signByCredential = {};
       let derivedPk = null;
       const ps = regResult.extResults.previewSign;
+      const psValid = ps?.generatedKey && byteLen(ps.generatedKey.keyHandle) > 0 && ps.generatedKey.algorithm !== 0;
 
-      if (ps?.generatedKey) {
+      if (psValid) {
         try {
           const origKh = toBytes(ps.generatedKey.keyHandle);
           const pkBytes = toBytes(ps.generatedKey.publicKey);
@@ -548,6 +554,8 @@
         } catch (e) {
           log("ARKG derivation failed: " + e.message, "error");
         }
+      } else {
+        log("Skipping previewSign in GetAssertion (not enabled on this key)");
       }
 
       const options = {
@@ -557,12 +565,14 @@
           allowCredentials: [{ type: "public-key", id: regResult.credentialId }],
           userVerification: "preferred",
           timeout: 120000,
-          extensions: {
-            previewSign: { signByCredential },
-            prf: { eval: { first: prfSalt1.buffer, second: prfSalt2.buffer } },
-            getCredBlob: true,
-            largeBlob: { write: new TextEncoder().encode(largeBlobTestData) },
-          },
+          extensions: Object.assign(
+            {
+              prf: { eval: { first: prfSalt1.buffer, second: prfSalt2.buffer } },
+              getCredBlob: true,
+              largeBlob: { write: new TextEncoder().encode(largeBlobTestData) },
+            },
+            psValid ? { previewSign: { signByCredential } } : {}
+          ),
         },
       };
 
@@ -586,6 +596,8 @@
       if (ext.previewSign?.signature) {
         const sigBytes = toBytes(ext.previewSign.signature);
         pass("previewsign-sig", `${sigBytes?.length || 0} bytes`);
+      } else if (!psValid) {
+        skip("previewsign-sig", "previewSign not enabled on this key");
       } else {
         fail("previewsign-sig");
       }
@@ -613,6 +625,8 @@
         } catch (e) {
           fail("arkg-verify", e.message);
         }
+      } else if (!psValid) {
+        skip("arkg-verify", "previewSign not enabled on this key");
       } else {
         skip("arkg-verify", "no previewSign signature or derived key");
       }
