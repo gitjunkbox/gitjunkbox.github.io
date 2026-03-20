@@ -488,7 +488,8 @@
       if (ext.prf?.enabled === true) pass("prf-enabled"); else fail("prf-enabled", String(ext.prf?.enabled));
       if (ext.prf?.results?.first) pass("prf-mc-results", `first=${byteLen(ext.prf.results.first)}B`); else skip("prf-mc-results", "no hmac-secret-mc");
       if (ext.credProps?.rk != null) pass("credprops-rk", `rk=${ext.credProps.rk}`); else fail("credprops-rk");
-      if (ext.credentialProtectionPolicy != null) pass("credprotect", `level ${ext.credentialProtectionPolicy}`); else skip("credprotect");
+      if (ext.credentialProtectionPolicy != null) pass("credprotect", `level ${ext.credentialProtectionPolicy}`);
+      else skip("credprotect", "in attestationObject, not surfaced in clientExtensionResults");
       if (ext.credBlob === true) pass("credblob-set"); else fail("credblob-set", String(ext.credBlob));
       if (ext.largeBlob?.supported === true) pass("largeblob-supported"); else skip("largeblob-supported", ext.largeBlob?.supported === false ? "not supported" : "not in results");
 
@@ -591,15 +592,10 @@
       // ARKG signature verification (raw ECDSA — authenticator signs pre-hashed TBS)
       if (derivedPk && ext.previewSign?.signature) {
         try {
-          const sigForVerify = toBytes(ext.previewSign.signature);
-          log("ARKG verify: sig=" + hex(sigForVerify) + " (" + sigForVerify.length + "B)");
-          log("ARKG verify: tbsHash=" + hex(tbsHash));
-          log("ARKG verify: derivedPk=(" + derivedPk.x.toString(16).slice(0,16) + "...)");
-          const valid = verifyEcdsaP256Raw(derivedPk, sigForVerify, tbsHash);
+          const valid = verifyEcdsaP256Raw(derivedPk, ext.previewSign.signature, tbsHash);
           if (valid) pass("arkg-verify"); else fail("arkg-verify", "signature invalid");
         } catch (e) {
           fail("arkg-verify", e.message);
-          log("ARKG verify error: " + e.stack, "error");
         }
       } else {
         skip("arkg-verify", "no previewSign signature or derived key");
