@@ -97,11 +97,10 @@
         { id: "prf-second", label: "prf.results.second" },
         { id: "credblob-get", label: "credBlob retrieved" },
         { id: "arkg-verify", label: "ARKG signature verified" },
+        { id: "lb-write", label: "largeBlob written" },
       ],
       largeBlob: [
-        { id: "lb-read-empty", label: "largeBlob initial read" },
-        { id: "lb-write", label: "largeBlob write" },
-        { id: "lb-readback", label: "largeBlob read back" },
+        { id: "lb-readback", label: "largeBlob read back verified" },
       ],
     };
 
@@ -121,7 +120,7 @@
     function skip(id, detail) { results[id] = { status: "skip", detail: detail || "" }; renderSummary(); }
 
     const ICONS = { pass: "\u2713", fail: "\u2717", skip: "\u2013", pending: "\u00B7" };
-    const SECTION_LABELS = { create: "MakeCredential", get: "GetAssertion", largeBlob: "LargeBlob Lifecycle" };
+    const SECTION_LABELS = { create: "MakeCredential", get: "GetAssertion + LargeBlob Write", largeBlob: "LargeBlob Read Back" };
 
     function renderSummary() {
       const el = document.getElementById("summary");
@@ -374,7 +373,7 @@
         await doRegister();
         if (regResult) {
           await doAuthenticate();
-          await doLargeBlobLifecycle();
+          await doLargeBlobReadBack();
         }
       } catch (e) {
         log("Fatal: " + e.message, "error");
@@ -465,6 +464,7 @@
       const prfSalt2 = crypto.getRandomValues(new Uint8Array(32));
       const tbsRaw = new TextEncoder().encode("Hello, previewSign v4!");
       const tbsHash = new Uint8Array(await crypto.subtle.digest("SHA-256", tbsRaw));
+      const largeBlobTestData = document.getElementById("large-blob-input").value + " @ " + new Date().toISOString();
 
       // Build previewSign signByCredential with ARKG
       const credIdB64 = b64url(regResult.credentialId);
@@ -500,6 +500,7 @@
             previewSign: { signByCredential },
             prf: { eval: { first: prfSalt1.buffer, second: prfSalt2.buffer } },
             getCredBlob: true,
+            largeBlob: { write: new TextEncoder().encode(largeBlobTestData) },
           },
         },
       };
@@ -557,82 +558,54 @@
       } else {
         skip("arkg-verify", "no previewSign signature or derived key");
       }
+
+      // largeBlob write result
+      if (ext.largeBlob?.written === true) {
+        pass("lb-write");
+        regResult.largeBlobWrittenData = largeBlobTestData;  // save for read-back verification
+      } else if (ext.largeBlob?.written === false) {
+        fail("lb-write", "write failed");
+      } else if (!regResult.extResults.largeBlob?.supported) {
+        skip("lb-write", "largeBlob not supported");
+      } else {
+        fail("lb-write", "not in results");
+      }
     }
 
     // =========================================================================
-    // 3. LargeBlob lifecycle (auto-runs after authenticate)
+    // 3. LargeBlob read-back (auto-runs after authenticate to verify write)
     // =========================================================================
 
-    async function doLargeBlobLifecycle() {
-      if (!regResult) return;
-      if (!regResult.extResults.largeBlob?.supported) {
-        skip("lb-read-empty", "largeBlob not supported");
-        skip("lb-write", "largeBlob not supported");
-        skip("lb-readback", "largeBlob not supported");
+    async function doLargeBlobReadBack() {
+      if (!regResult?.largeBlobWrittenData) {
+        skip("lb-readback", "no largeBlob write to verify");
         return;
       }
 
-      log("\n=== LargeBlob Lifecycle ===", "status");
-      const baseOpts = () => ({
-        publicKey: {
-          rpId: location.hostname,
-          challenge: crypto.getRandomValues(new Uint8Array(32)),
-          allowCredentials: [{ type: "public-key", id: regResult.credentialId }],
-          userVerification: "preferred",
-          timeout: 120000,
-        },
-      });
-
-      // Step 1: Read (expect empty)
+      log("\n=== LargeBlob Read Back ===", "status");
       try {
-        log("Step 1: Reading largeBlob (expect empty)...", "status");
-        const opts1 = baseOpts();
-        opts1.publicKey.extensions = { largeBlob: { read: true } };
-        const r1 = await navigator.credentials.get(opts1);
-        const ext1 = r1.getClientExtensionResults ? r1.getClientExtensionResults() : {};
-        const blob1 = ext1.largeBlob?.blob;
-        if (!blob1 || byteLen(blob1) === 0) {
-          pass("lb-read-empty", "empty as expected");
-        } else {
-          pass("lb-read-empty", `got ${byteLen(blob1)}B (pre-existing data)`);
-        }
-      } catch (e) {
-        fail("lb-read-empty", e.message);
-        return;
-      }
+        log("Reading largeBlob to verify write...", "status");
+        const opts = {
+          publicKey: {
+            rpId: location.hostname,
+            challenge: crypto.getRandomValues(new Uint8Array(32)),
+            allowCredentials: [{ type: "public-key", id: regResult.credentialId }],
+            userVerification: "preferred",
+            timeout: 120000,
+            extensions: { largeBlob: { read: true } },
+          },
+        };
 
-      // Step 2: Write
-      const testData = document.getElementById("large-blob-input").value + " @ " + new Date().toISOString();
-      try {
-        log("Step 2: Writing largeBlob: \"" + testData + "\"", "status");
-        const opts2 = baseOpts();
-        opts2.publicKey.extensions = { largeBlob: { write: new TextEncoder().encode(testData) } };
-        const r2 = await navigator.credentials.get(opts2);
-        const ext2 = r2.getClientExtensionResults ? r2.getClientExtensionResults() : {};
-        if (ext2.largeBlob?.written === true) {
-          pass("lb-write");
-        } else {
-          fail("lb-write", "written=" + ext2.largeBlob?.written);
-        }
-      } catch (e) {
-        fail("lb-write", e.message);
-        return;
-      }
-
-      // Step 3: Read back
-      try {
-        log("Step 3: Reading back largeBlob...", "status");
-        const opts3 = baseOpts();
-        opts3.publicKey.extensions = { largeBlob: { read: true } };
-        const r3 = await navigator.credentials.get(opts3);
-        const ext3 = r3.getClientExtensionResults ? r3.getClientExtensionResults() : {};
-        const blob3 = ext3.largeBlob?.blob;
-        if (blob3) {
-          const readBack = new TextDecoder().decode(toBytes(blob3));
-          if (readBack === testData) {
-            pass("lb-readback", `"${readBack.slice(0, 30)}..."`);
+        log("Touch your security key...", "status");
+        const r = await navigator.credentials.get(opts);
+        const ext = r.getClientExtensionResults ? r.getClientExtensionResults() : {};
+        const blob = ext.largeBlob?.blob;
+        if (blob) {
+          const readBack = new TextDecoder().decode(toBytes(blob));
+          if (readBack === regResult.largeBlobWrittenData) {
+            pass("lb-readback", `"${readBack.slice(0, 40)}"`);
           } else {
-            fail("lb-readback", `mismatch: got "${readBack.slice(0, 30)}"`);
+            fail("lb-readback", `mismatch: got "${readBack.slice(0, 40)}"`);
           }
         } else {
           fail("lb-readback", "no blob returned");
